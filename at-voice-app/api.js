@@ -33,14 +33,21 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
     // per-request (same pattern GET /api/agents/stats already uses) rather
     // than a SQL join — the agents table is tiny.
     async function attachAgentNames(rows) {
-        const { data: agentRows } = await supabase.from('agents').select('phone, name');
-        // agent_number isn't stored consistently — the softphone flow keeps
-        // agents.phone's leading +, the legacy Africa's Talking flow strips
-        // it (app.js's normalizePhone) — so both sides are normalized to the
-        // same no-plus form here rather than matched as-is, which only ever
-        // matched the softphone case.
+        const { data: agentRows } = await supabase.from('agents').select('id, phone, name');
+        // agent_id is the reliable match — set by ari-app on every call since
+        // migration 016. agent_number is the fallback for rows written before
+        // that (or if a phone happens to be the only thing set): the
+        // softphone flow keeps agents.phone's leading +, the legacy Africa's
+        // Talking flow strips it (app.js's normalizePhone), so both sides are
+        // normalized to the same no-plus form here rather than matched as-is.
+        const nameById = new Map((agentRows || []).map(a => [a.id, a.name]));
         const nameByPhone = new Map((agentRows || []).map(a => [normalizePhone(a.phone), a.name]));
-        return rows.map(row => ({ ...row, agent_name: row.agent_number ? nameByPhone.get(normalizePhone(row.agent_number)) ?? null : null }));
+        return rows.map(row => ({
+            ...row,
+            agent_name:
+                (row.agent_id != null ? nameById.get(row.agent_id) : null) ??
+                (row.agent_number ? nameByPhone.get(normalizePhone(row.agent_number)) ?? null : null)
+        }));
     }
 
     // Best-effort direction classification. IVR-originated rows often don't
@@ -421,7 +428,12 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize, 10) || 20));
 
         const [{ data: callData, error: callError }, { data: agentRows, error: agentError }] = await Promise.all([
-            supabase.from('call_logs').select('agent_number, status, duration, direction').not('agent_number', 'is', null),
+            // No .not('agent_number', 'is', null) filter here anymore — that
+            // silently excluded every call from an agent with no phone
+            // number set (9 of 10 real agents, confirmed live) before it
+            // even reached the JS below, since their calls only ever had
+            // agent_id set, never agent_number.
+            supabase.from('call_logs').select('agent_id, agent_number, status, duration, direction'),
             supabase.from('agents').select('id, name, phone')
         ]);
 
@@ -430,18 +442,30 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
             return res.status(500).json({ error: 'Failed to load agent stats' });
         }
 
-        // agent_number isn't stored consistently — the softphone flow keeps
-        // agents.phone's leading +, the legacy Africa's Talking flow strips
-        // it (app.js's normalizePhone) — so both sides are normalized to the
-        // same no-plus form for keying/lookup here. Without this, a legacy
-        // agent's calls landed in their own "Unknown agent" bucket instead
-        // of merging into that agent's real leaderboard row.
+        // agent_id (set by ari-app since migration 016) is the reliable
+        // match. agent_number is the fallback for rows written before that —
+        // it isn't even stored consistently on its own: the softphone flow
+        // keeps agents.phone's leading +, the legacy Africa's Talking flow
+        // strips it (app.js's normalizePhone), so both sides are normalized
+        // to the same no-plus form for keying/lookup here.
+        const agentById = new Map(agentRows.map(a => [a.id, a]));
         const nameByPhone = new Map(agentRows.map(a => [normalizePhone(a.phone), a]));
 
         const stats = {};
         callData.forEach(row => {
-            const key = normalizePhone(row.agent_number);
-            if (!stats[key]) stats[key] = { phone: key, total: 0, answered: 0, missed: 0, durationSum: 0 };
+            let agent = row.agent_id != null ? agentById.get(row.agent_id) : null;
+            if (!agent && row.agent_number) agent = nameByPhone.get(normalizePhone(row.agent_number));
+
+            // A row with neither field set never had an agent at all (e.g.
+            // an abandoned call nobody answered) — nothing to bucket. A row
+            // with agent_number set but matching no *current* agent (a
+            // stray/legacy value) still gets its own "Unknown agent" bucket,
+            // same as before, keyed by that raw value so it doesn't merge
+            // with a different stray value.
+            if (!agent && !row.agent_number) return;
+            const key = agent ? `id:${agent.id}` : `unknown:${normalizePhone(row.agent_number)}`;
+
+            if (!stats[key]) stats[key] = { agent, total: 0, answered: 0, missed: 0, durationSum: 0 };
             stats[key].total++;
             if (row.status === 'completed') {
                 stats[key].answered++;
@@ -462,17 +486,14 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
             }
         });
 
-        const allAgents = Object.values(stats).map(s => {
-            const agent = nameByPhone.get(s.phone);
-            return {
-                id: agent?.id ?? null,
-                name: agent?.name ?? 'Unknown agent',
-                total: s.total,
-                answered: s.answered,
-                missed: s.missed,
-                avgHandleTime: s.answered ? Math.round(s.durationSum / s.answered) : 0
-            };
-        });
+        const allAgents = Object.values(stats).map(s => ({
+            id: s.agent?.id ?? null,
+            name: s.agent?.name ?? 'Unknown agent',
+            total: s.total,
+            answered: s.answered,
+            missed: s.missed,
+            avgHandleTime: s.answered ? Math.round(s.durationSum / s.answered) : 0
+        }));
 
         if (!explicitPaging) {
             return res.json({ agents: allAgents, page: 1, pageSize: allAgents.length, total: allAgents.length, totalPages: 1 });
@@ -576,20 +597,40 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
             return res.json({ call: null, agentStatus: null });
         }
 
-        // agent_number isn't stored consistently: the softphone flow writes
-        // agents.phone as-is (with its leading +), but the legacy Africa's
-        // Talking flow runs it through normalizePhone() first, which strips
-        // it (app.js). Matching only agent.phone directly left every legacy
-        // agent's active-call/wrap-up/add-party detection unable to ever
-        // find their own in-progress call.
-        const { data: call } = await supabase
-            .from('call_logs')
-            .select('*')
-            .in('agent_number', [agent.phone, normalizePhone(agent.phone)])
-            .eq('status', 'ongoing')
-            .order('created_at', { ascending: false })
-            .limit(1)
-            .maybeSingle();
+        // agent_id (set by ari-app since migration 016) first — the only
+        // reliable match, since agent_number requires agents.phone to be
+        // set at all, which it never is for an agent provisioned through
+        // the modern SIP flow (confirmed live: 9 of 10 real agents), no
+        // matter how the phone-format mismatch below is handled. Falls back
+        // to the old phone-based match only for rows written before that
+        // migration.
+        let call = null;
+        if (req.user.agentId) {
+            const { data } = await supabase
+                .from('call_logs')
+                .select('*')
+                .eq('agent_id', req.user.agentId)
+                .eq('status', 'ongoing')
+                .order('created_at', { ascending: false })
+                .limit(1)
+                .maybeSingle();
+            call = data;
+        }
+        if (!call && agent.phone) {
+            // agent_number isn't stored consistently: the softphone flow
+            // writes agents.phone as-is (with its leading +), but the legacy
+            // Africa's Talking flow runs it through normalizePhone() first,
+            // which strips it (app.js).
+            const { data } = await supabase
+                .from('call_logs')
+                .select('*')
+                .in('agent_number', [agent.phone, normalizePhone(agent.phone)])
+                .eq('status', 'ongoing')
+                .order('created_at', { ascending: false })
+                .limit(1)
+                .maybeSingle();
+            call = data;
+        }
 
         res.json({ call: call ?? null, agentStatus: agent.status });
     });
@@ -616,16 +657,31 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         }
 
         // See the matching comment on GET /api/agents/me/active-call above —
-        // agent_number can be stored with or without the leading + depending
-        // on which call flow wrote it.
-        const { data: call } = await supabase
-            .from('call_logs')
-            .select('session_id, add_party_status')
-            .in('agent_number', [agent.phone, normalizePhone(agent.phone)])
-            .eq('status', 'ongoing')
-            .order('created_at', { ascending: false })
-            .limit(1)
-            .maybeSingle();
+        // agent_id first (the only reliable match), agent_number as a
+        // fallback for rows written before migration 016.
+        let call = null;
+        if (req.user.agentId) {
+            const { data } = await supabase
+                .from('call_logs')
+                .select('session_id, add_party_status')
+                .eq('agent_id', req.user.agentId)
+                .eq('status', 'ongoing')
+                .order('created_at', { ascending: false })
+                .limit(1)
+                .maybeSingle();
+            call = data;
+        }
+        if (!call && agent.phone) {
+            const { data } = await supabase
+                .from('call_logs')
+                .select('session_id, add_party_status')
+                .in('agent_number', [agent.phone, normalizePhone(agent.phone)])
+                .eq('status', 'ongoing')
+                .order('created_at', { ascending: false })
+                .limit(1)
+                .maybeSingle();
+            call = data;
+        }
 
         if (!call) {
             return res.status(400).json({ error: 'No active call' });

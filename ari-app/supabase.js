@@ -5,8 +5,28 @@ const ws = require('ws');
 // this app never subscribes to anything), which needs a WebSocket
 // implementation — Node 20 has no native `WebSocket` global (that only
 // landed in Node 22), so it must be provided explicitly here.
+
+// @supabase/supabase-js has no built-in request timeout — a hung connection
+// or an unresponsive Supabase-side incident just hangs the awaiting call
+// forever. Confirmed live: two real customers' IVR sessions got stuck for
+// 20+ minutes (only ever "resolved" by the periodic stale-call sweep
+// correcting the database row after the fact — the actual in-progress call
+// handling itself never resumed) when a Supabase request during runIvrMenu
+// never came back. Every call site here already checks the returned
+// {error} and degrades gracefully (skip this agent, treat as no data,
+// fall back to a default) — a custom fetch that aborts after
+// SUPABASE_TIMEOUT_MS turns "hangs forever" into "fails after 8s", which
+// that existing handling was already written to survive.
+const SUPABASE_TIMEOUT_MS = 8000;
+function timeoutFetch(url, options = {}) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), SUPABASE_TIMEOUT_MS);
+    return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
+}
+
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY, {
-    realtime: { transport: ws }
+    realtime: { transport: ws },
+    global: { fetch: timeoutFetch }
 });
 
 // Re-fetched fresh on every call (and every runIvrMenu recursion) rather

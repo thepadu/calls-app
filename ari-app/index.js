@@ -686,11 +686,14 @@ async function bridgeAgentLeg(agentChannel, agentId, customerSessionId) {
 
         state.startedAt = Date.now();
         await setAgentStatus(agentId, 'on_call');
-        // Match the same field the rest of the app already keys on — the
-        // React app's GET /api/agents/me/active-call looks this row up by
-        // agent.phone, not agent id.
+        // agent_id is the reliable identifier — agent_number (kept for
+        // backward compatibility with rows/code that still read it) is
+        // matched against agents.phone, which is null for every agent
+        // provisioned through the modern SIP flow (confirmed live: 9 of 10
+        // real agents), silently breaking their attribution, their own
+        // active-call lookup, and their stats entirely.
         const agentPhone = await getAgentPhone(agentId);
-        await upsertCallLog({ session_id: customerSessionId, status: 'ongoing', agent_number: agentPhone });
+        await upsertCallLog({ session_id: customerSessionId, status: 'ongoing', agent_id: agentId, agent_number: agentPhone });
 
         console.log(`🔗 Bridged ${customerSessionId} with agent ${agentId}`);
     } catch (err) {
@@ -826,6 +829,7 @@ async function handleOutboundAgentCall(agentChannel, destination) {
             caller: calledNumber,
             direction: 'Outbound',
             status: 'dialing',
+            agent_id: agentInfo?.id ?? null,
             agent_number: agentInfo?.phone || null
         });
     })();
