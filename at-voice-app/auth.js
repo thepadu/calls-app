@@ -431,7 +431,8 @@ module.exports = function (app, supabase) {
 
     // Stricter than requireAuth — role is baked into the JWT at login time,
     // so promoting someone to supervisor requires them to log out/in (or
-    // wait out the 7-day token expiry) before it takes effect.
+    // wait out the sliding-session refresh in requireAuth, up to ~1h of
+    // activity) before it takes effect.
     function requireSupervisor(req, res, next) {
         requireAuth(req, res, () => {
             if (req.user?.role !== 'supervisor') {
