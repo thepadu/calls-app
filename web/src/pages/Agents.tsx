@@ -17,7 +17,7 @@ const PAGE_SIZE = 20;
 type Agent = {
     id: number;
     name: string;
-    phone: string;
+    phone: string | null;
     email: string | null;
     status: 'available' | 'on_call' | 'ringing' | 'break' | 'offline';
     role: 'agent' | 'supervisor';
@@ -67,7 +67,14 @@ export default function Agents() {
         // a number the way everyone actually types it (0712345678) instead
         // of hitting a server-side validation error for not typing "+254".
         mutationFn: () => {
-            const body = { ...form, phone: `+${formatPhone(form.phone)}` };
+            // Editing an agent with no phone on file (most real agents —
+            // provisioned through the modern SIP flow, which doesn't need
+            // one) shouldn't force one into existence just to save an
+            // unrelated change like their name or role. `undefined` here
+            // drops the key entirely (JSON.stringify skips it), which the
+            // backend's PATCH handler already treats as "leave phone alone".
+            const phoneEntered = form.phone.trim().length > 0;
+            const body = { ...form, phone: phoneEntered ? `+${formatPhone(form.phone)}` : editingId ? undefined : '' };
             return editingId
                 ? apiFetch(`/api/agents/${editingId}`, { method: 'PATCH', body: JSON.stringify(body) })
                 : apiFetch('/api/agents', { method: 'POST', body: JSON.stringify(body) });
@@ -81,7 +88,12 @@ export default function Agents() {
     });
 
     function submitAgent() {
-        if (!isValidPhone(formatPhone(form.phone))) {
+        // A phone number is only required when creating a new (legacy
+        // phone-ring) agent, or when editing one and actually typing a
+        // number in — not for every save of an agent who was provisioned
+        // through the modern SIP flow and has never had one.
+        const phoneEntered = form.phone.trim().length > 0;
+        if ((!editingId || phoneEntered) && !isValidPhone(formatPhone(form.phone))) {
             setFormError('Enter a valid Kenyan number (e.g. 0712345678 or +254712345678)');
             return;
         }
@@ -115,7 +127,7 @@ export default function Agents() {
 
     function openEditForm(agent: Agent) {
         setEditingId(agent.id);
-        setForm({ name: agent.name, phone: agent.phone, email: agent.email ?? '', role: agent.role });
+        setForm({ name: agent.name, phone: agent.phone ?? '', email: agent.email ?? '', role: agent.role });
         setFormError('');
         setFormOpen(true);
     }
@@ -156,7 +168,7 @@ export default function Agents() {
                                 <div className="agent-avatar">{initials(agent.name)}</div>
                                 <div style={{ minWidth: 0 }}>
                                     <div className="agent-card-name">{agent.name}</div>
-                                    <div className="agent-card-meta">{agent.phone}</div>
+                                    <div className="agent-card-meta">{agent.phone ?? 'No phone (softphone agent)'}</div>
                                     {agent.email && <div className="agent-card-meta">{agent.email}</div>}
                                 </div>
                             </div>

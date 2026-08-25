@@ -113,10 +113,15 @@ async function getNoAgentsForwardingDestination() {
     const { data: config } = await supabase.from('forwarding_config').select('enabled').eq('id', 1).maybeSingle();
     if (!config?.enabled) return null;
 
+    // Ordered defensively even though `condition` is now unique
+    // (migration 018) — picks the most recently set one rather than an
+    // arbitrary row if this ever runs against a database from before that
+    // constraint existed.
     const { data: rule } = await supabase
         .from('forwarding_rules')
         .select('destination')
         .eq('condition', 'no_answer')
+        .order('created_at', { ascending: false })
         .limit(1)
         .maybeSingle();
 

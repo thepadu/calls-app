@@ -29,6 +29,15 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         return typeof value === 'string' && value.length <= maxLen;
     }
 
+    // tickets.assigned_agent_id is `bigint references agents(id)` — a
+    // number, not free text. The frontend's assignee dropdown always sends
+    // it as a JSON number, which isValidTicketText's `typeof === 'string'`
+    // check rejected outright — assigning an agent at ticket creation (or
+    // via a later edit) failed with "Invalid assigned_agent_id" every time.
+    function isValidAgentId(value) {
+        return Number.isInteger(value);
+    }
+
     // Cheap enough at this project's scale to just fetch and map by phone
     // per-request (same pattern GET /api/agents/stats already uses) rather
     // than a SQL join — the agents table is tiny.
@@ -967,6 +976,16 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
             return res.status(400).json({ error: 'label and a valid action are required' });
         }
 
+        // A 'message' option with no response_message means a caller who
+        // presses that digit hears nothing at all and gets immediately
+        // hung up on (ari-app's runIvrMenu only plays it `if
+        // (option.response_message)`, then hangs up unconditionally for
+        // this action) — invisible in the editor, since nothing here
+        // stopped it from being saved looking "complete".
+        if (action === 'message' && (!response_message || !response_message.trim())) {
+            return res.status(400).json({ error: 'A response message is required for the "message" action' });
+        }
+
         const { data, error } = await supabase
             .from('ivr_options')
             .insert({ digit, label, response_message: response_message || null, action })
@@ -986,6 +1005,25 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
 
         if (action !== undefined && !['message', 'transfer_agent', 'repeat_menu'].includes(action)) {
             return res.status(400).json({ error: 'Invalid action' });
+        }
+
+        // Same reasoning as POST /api/ivr-options — but a PATCH can touch
+        // only one of action/response_message at a time, so the *resulting*
+        // combination (this update merged with whatever's already saved)
+        // is what actually needs checking, not just what this one request
+        // happened to include. Only worth the extra lookup when one of
+        // those two fields is actually in play.
+        if (action === 'message' || response_message !== undefined) {
+            const { data: current } = await supabase
+                .from('ivr_options')
+                .select('action, response_message')
+                .eq('digit', req.params.digit)
+                .maybeSingle();
+            const effectiveAction = action !== undefined ? action : current?.action;
+            const effectiveMessage = response_message !== undefined ? response_message : current?.response_message;
+            if (effectiveAction === 'message' && (!effectiveMessage || !effectiveMessage.trim())) {
+                return res.status(400).json({ error: 'A response message is required for the "message" action' });
+            }
         }
 
         const updates = { updated_at: new Date().toISOString() };
@@ -1084,7 +1122,7 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         if (notes !== undefined && notes !== null && !isValidTicketText(notes, 2000)) {
             return res.status(400).json({ error: 'Invalid notes' });
         }
-        if (assigned_agent_id !== undefined && assigned_agent_id !== null && !isValidTicketText(assigned_agent_id, 64)) {
+        if (assigned_agent_id !== undefined && assigned_agent_id !== null && !isValidAgentId(assigned_agent_id)) {
             return res.status(400).json({ error: 'Invalid assigned_agent_id' });
         }
 
@@ -1129,7 +1167,7 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         if (notes !== undefined && notes !== null && !isValidTicketText(notes, 2000)) {
             return res.status(400).json({ error: 'Invalid notes' });
         }
-        if (assigned_agent_id !== undefined && assigned_agent_id !== null && !isValidTicketText(assigned_agent_id, 64)) {
+        if (assigned_agent_id !== undefined && assigned_agent_id !== null && !isValidAgentId(assigned_agent_id)) {
             return res.status(400).json({ error: 'Invalid assigned_agent_id' });
         }
 
@@ -1281,9 +1319,15 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
             return res.status(400).json({ error: 'Destination is required' });
         }
 
+        // Upsert, not insert — the UI has no way to edit an existing rule,
+        // only add and delete, so "change the no_answer destination" means
+        // clicking "+ Add rule" again. A plain insert left the old row in
+        // place too, and getNoAgentsForwardingDestination() (ari-app) had no
+        // way to know which of the two duplicates for the same condition
+        // was actually meant to be current.
         const { data, error } = await supabase
             .from('forwarding_rules')
-            .insert({ condition, destination: destination.trim() })
+            .upsert({ condition, destination: destination.trim() }, { onConflict: 'condition' })
             .select()
             .single();
 
