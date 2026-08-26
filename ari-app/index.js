@@ -38,7 +38,7 @@ const {
     reconcileGhostAgents,
     sweepStaleCalls
 } = require('./supabase');
-const { writeAgentBlock } = require('./pjsipConfig');
+const { writeAgentBlock, deprovisionAgentBlock } = require('./pjsipConfig');
 
 // ari-client's error objects don't reliably carry a string .message — for at
 // least some ARI REST error responses (e.g. a 404 against a channel that
@@ -252,6 +252,41 @@ http.createServer(async (req, res) => {
             const status = err.code === 'BLOCK_CONFLICT' ? 409 : 500;
             console.error('❌ provision-agent failed:', errText(err));
             res.writeHead(status, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: errText(err) }));
+        }
+        return;
+    }
+
+    if (req.method === 'POST' && req.url === '/internal/deprovision-agent') {
+        if (!INTERNAL_SECRET || !safeEqual(req.headers['x-chumz-internal-secret'], INTERNAL_SECRET)) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Unauthorized' }));
+            return;
+        }
+
+        let body;
+        try {
+            body = await readJsonBody(req);
+        } catch (err) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+            return;
+        }
+
+        const { agentId } = body;
+        if (!Number.isInteger(agentId) || agentId <= 0) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Invalid agentId' }));
+            return;
+        }
+
+        try {
+            const result = await deprovisionAgentBlock(agentId);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, ...result }));
+        } catch (err) {
+            console.error('❌ deprovision-agent failed:', errText(err));
+            res.writeHead(500, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: errText(err) }));
         }
         return;
@@ -739,7 +774,18 @@ async function bridgeAgentLeg(agentChannel, agentId, customerSessionId) {
     // answering "simultaneously" still resolve one-at-a-time here. Whoever
     // loses the race sees claimedSessions already holding this session and
     // backs off instead of double-bridging the same customer channel.
-    if (!customerChannel || claimedSessions.has(customerSessionId)) {
+    //
+    // ringGroupBySessionId.has(...) catches a narrower, earlier version of
+    // the same race: this agent's originate() can still be in flight (not
+    // yet pushed into the ring group array in dequeueNext) when the
+    // customer hangs up — the global StasisEnd handler's stopSiblingRings
+    // call only hangs up legs already IN that array, and deletes this map
+    // entry regardless, so its absence here reliably means the customer's
+    // own cleanup already ran even for a leg that arrived too late to be
+    // in the array yet. Checked BEFORE answer() specifically so a customer
+    // who already left never sees the agent's softphone briefly "answer"
+    // only to be instantly torn down a moment later.
+    if (!customerChannel || claimedSessions.has(customerSessionId) || !ringGroupBySessionId.has(customerSessionId)) {
         await agentChannel.hangup().catch(() => {});
         await setAgentStatus(agentId, 'available');
         return;
