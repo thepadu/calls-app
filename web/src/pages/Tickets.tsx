@@ -28,9 +28,12 @@ type Ticket = {
     assigned_agent_id: number | null;
     assigned_agent_name: string | null;
     notes: string | null;
+    created_at: string;
 };
 
 type Agent = { id: number; name: string };
+
+const RECENT_CALLS_PAGE_SIZE = 8;
 
 function errorMessage(err: unknown) {
     return err instanceof Error ? err.message : 'Something went wrong';
@@ -44,6 +47,9 @@ export default function Tickets() {
     const [ticketsPage, setTicketsPage] = useState(1);
     const [statusFilter, setStatusFilter] = useState('');
     const [tagFilter, setTagFilter] = useState('');
+    const [searchDraft, setSearchDraft] = useState('');
+    const [search, setSearch] = useState('');
+    const [recentCallsPage, setRecentCallsPage] = useState(1);
 
     function changeStatusFilter(value: string) {
         setStatusFilter(value);
@@ -55,23 +61,46 @@ export default function Tickets() {
         setTicketsPage(1);
     }
 
+    function applySearch() {
+        setSearch(searchDraft.trim());
+        setTicketsPage(1);
+    }
+
     const ticketsParams = new URLSearchParams({ page: String(ticketsPage), pageSize: '25' });
     if (statusFilter) ticketsParams.set('status', statusFilter);
     if (tagFilter) ticketsParams.set('tag', tagFilter);
+    if (search) ticketsParams.set('q', search);
 
-    const { data: callsData } = useQuery({ queryKey: ['calls', 'recent'], queryFn: () => apiFetch('/api/calls') });
-    const { data: ticketsData } = useQuery({
-        queryKey: ['tickets', ticketsPage, statusFilter, tagFilter],
+    const recentCallsParams = new URLSearchParams({ page: String(recentCallsPage), pageSize: String(RECENT_CALLS_PAGE_SIZE) });
+
+    const { data: callsData, isLoading: callsLoading, isError: callsIsError } = useQuery({
+        queryKey: ['calls', 'recent', recentCallsPage],
+        queryFn: () => apiFetch(`/api/calls?${recentCallsParams.toString()}`)
+    });
+    const { data: ticketsData, isLoading: ticketsLoading, isError: ticketsIsError } = useQuery({
+        queryKey: ['tickets', ticketsPage, statusFilter, tagFilter, search],
         queryFn: () => apiFetch(`/api/tickets?${ticketsParams.toString()}`)
     });
     const { data: tagsData } = useQuery({ queryKey: ['ticket-tags'], queryFn: () => apiFetch('/api/ticket-tags') });
     const { data: agentsData } = useQuery({ queryKey: ['agents-assignable'], queryFn: () => apiFetch('/api/agents/assignable') });
 
-    const recentCalls: Call[] = (callsData?.calls ?? []).slice(0, 8);
+    const recentCalls: Call[] = callsData?.calls ?? [];
+    const recentCallsTotal: number = callsData?.total ?? 0;
+    const recentCallsTotalPages: number = callsData?.totalPages ?? 1;
     const tickets: Ticket[] = ticketsData?.tickets ?? [];
+    const ticketsTotal: number = ticketsData?.total ?? 0;
     const ticketsTotalPages: number = ticketsData?.totalPages ?? 1;
     const tags: string[] = tagsData?.tags ?? [];
     const agents: Agent[] = agentsData?.agents ?? [];
+
+    const recentCallsStatusMessage = callsIsError ? "Couldn't load calls." : callsLoading ? 'Loading…' : recentCalls.length === 0 ? 'No calls yet.' : null;
+    const ticketsStatusMessage = ticketsIsError
+        ? "Couldn't load tickets."
+        : ticketsLoading
+        ? 'Loading…'
+        : tickets.length === 0
+        ? `No tickets${statusFilter || tagFilter || search ? ' match these filters.' : ' yet.'}`
+        : null;
 
     const [selectedCall, setSelectedCall] = useState<Call | null>(null);
     const [tag, setTag] = useState('');
@@ -175,8 +204,8 @@ export default function Tickets() {
         <div className="ivr-layout">
             <div>
                 <div className="panel">
-                    <h3>Recent calls</h3>
-                    {recentCalls.length === 0 && <p className="empty">No calls yet.</p>}
+                    <h3>Recent calls {recentCallsTotal > 0 && <span className="hint" style={{ fontWeight: 400 }}>({recentCallsTotal})</span>}</h3>
+                    {recentCallsStatusMessage && <p className="empty">{recentCallsStatusMessage}</p>}
                     {recentCalls.map(call => (
                         <div className="recent-call-row" key={call.session_id}>
                             <div>
@@ -190,12 +219,21 @@ export default function Tickets() {
                             </button>
                         </div>
                     ))}
+                    <Pagination page={recentCallsPage} totalPages={recentCallsTotalPages} onPageChange={setRecentCallsPage} />
                 </div>
 
                 <div className="panel">
                     <div className="panel-header">
-                        <h3>Tickets</h3>
+                        <h3>Tickets {ticketsTotal > 0 && <span className="hint" style={{ fontWeight: 400 }}>({ticketsTotal})</span>}</h3>
                         <div className="calls-filter-actions">
+                            <input
+                                value={searchDraft}
+                                onChange={e => setSearchDraft(e.target.value)}
+                                onKeyDown={e => e.key === 'Enter' && applySearch()}
+                                onBlur={applySearch}
+                                placeholder="Search by caller…"
+                                style={{ width: 140 }}
+                            />
                             <select value={statusFilter} onChange={e => changeStatusFilter(e.target.value)}>
                                 <option value="">All statuses</option>
                                 {TICKET_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
@@ -216,11 +254,12 @@ export default function Tickets() {
                                 <th>Status</th>
                                 <th>Assigned</th>
                                 <th>Notes</th>
+                                <th>Created</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {tickets.length === 0 && (
-                                <tr><td colSpan={7} className="empty">No tickets{statusFilter || tagFilter ? ' match these filters.' : ' yet.'}</td></tr>
+                            {ticketsStatusMessage && (
+                                <tr><td colSpan={8} className="empty">{ticketsStatusMessage}</td></tr>
                             )}
                             {tickets.map(t => (
                                 <tr key={t.id}>
@@ -267,6 +306,7 @@ export default function Tickets() {
                                             <FileText size={16} />
                                         </button>
                                     </td>
+                                    <td className="hint">{new Date(t.created_at).toLocaleString()}</td>
                                 </tr>
                             ))}
                         </tbody>
