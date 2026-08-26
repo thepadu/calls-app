@@ -86,6 +86,50 @@ function getAudioSender(session: Session) {
     return pc?.getSenders().find(s => s.track?.kind === 'audio') ?? null;
 }
 
+// Backgrounding the tab/PWA (switching apps mid-call on mobile) commonly
+// suspends getUserMedia capture at the OS/browser level while leaving the
+// RTCPeerConnection itself connected — the call stays "connected" but the
+// caller stops hearing the agent, with nothing here noticing or recovering
+// on its own. This is recovery, not prevention: that suspension is a
+// deliberate browser privacy/battery policy that can't be overridden, only
+// detected and fixed once the page is foregrounded again. A plain
+// replaceTrack() (not an ICE restart) is enough — swapping the local track
+// doesn't need SDP renegotiation, so this can't interact with
+// watchIceConnection's restart above.
+function watchLocalTrackHealth(session: Session) {
+    function isSuspended() {
+        const sender = getAudioSender(session);
+        return !!sender?.track && (sender.track.muted || sender.track.readyState === 'ended');
+    }
+
+    async function recover() {
+        if (session.state !== SessionState.Established || !isSuspended()) return;
+        const sender = getAudioSender(session);
+        if (!sender) return;
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: CALL_AUDIO_CONSTRAINTS, video: false });
+            const [freshTrack] = stream.getAudioTracks();
+            if (freshTrack) await sender.replaceTrack(freshTrack);
+        } catch (err) {
+            console.error('[softphone] failed to recover local audio track after backgrounding:', err);
+        }
+    }
+
+    const sender = getAudioSender(session);
+    if (sender?.track) {
+        sender.track.onmute = () => console.warn('[softphone] local audio track muted (likely backgrounded)');
+        sender.track.onunmute = () => console.log('[softphone] local audio track unmuted');
+    }
+
+    function handleVisibilityChange() {
+        if (document.visibilityState === 'visible') recover();
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    session.stateChange.addListener(state => {
+        if (state === SessionState.Terminated) document.removeEventListener('visibilitychange', handleVisibilityChange);
+    });
+}
+
 // The reconnect logic on the UserAgent's transport (see onDisconnect below)
 // only recovers the ability to register/receive new calls — it does nothing
 // for a call already in progress when an agent's network changes (wifi to
@@ -94,15 +138,30 @@ function getAudioSender(session: Session) {
 // it short of the call just going silent. A re-INVITE with iceRestart tells
 // the browser to renegotiate a fresh ICE candidate pair on the existing
 // dialog — the same call continues, just with a new media path.
-function watchIceConnection(session: Session) {
+// 'disconnected' is often transient (a missed STUN consent check, a brief
+// packet loss) and self-recovers without help — only 'failed' is the
+// browser's own final word. Debouncing 'disconnected' avoids firing a
+// restart for something that would have cleared itself a moment later;
+// 3s is comfortably shorter than most browsers' own internal
+// disconnected-to-failed transition, so this is the one giving a
+// deterministic response instead of waiting on that.
+const ICE_DISCONNECTED_DEBOUNCE_MS = 3000;
+
+function watchIceConnection(session: Session, onRestartFailed: () => void) {
     const pc = (session.sessionDescriptionHandler as unknown as { peerConnection: RTCPeerConnection })
         ?.peerConnection;
     if (!pc) return;
+    const startedAt = Date.now();
     let restarting = false;
-    pc.addEventListener('iceconnectionstatechange', () => {
-        if (pc.iceConnectionState !== 'failed' || restarting || session.state !== SessionState.Established) return;
+    let disconnectedTimer: ReturnType<typeof setTimeout> | undefined;
+
+    function attemptRestart(reason: string) {
+        if (restarting || session.state !== SessionState.Established) return;
         restarting = true;
-        console.warn('[softphone] ICE connection failed mid-call — attempting ICE restart');
+        // Logged with call duration so far — if an echo report recurs, this
+        // lets its timing be correlated against real restart events instead
+        // of guessing whether the two are actually related.
+        console.warn(`[softphone] ICE ${reason} mid-call (${Math.round((Date.now() - startedAt) / 1000)}s in) — attempting ICE restart`);
         // offerOptions is a web-platform-specific SessionDescriptionHandlerOptions
         // field that Session.invite()'s core type (shared across non-browser
         // platforms) doesn't declare, even though it's exactly what the web
@@ -113,10 +172,34 @@ function watchIceConnection(session: Session) {
         } as unknown as Parameters<typeof session.invite>[0];
         session
             .invite(restartOptions)
-            .catch(err => console.error('[softphone] ICE restart failed — call may drop:', err))
+            .catch(err => {
+                console.error('[softphone] ICE restart failed — call may drop:', err);
+                onRestartFailed();
+            })
             .finally(() => {
                 restarting = false;
             });
+    }
+
+    pc.addEventListener('iceconnectionstatechange', () => {
+        const state = pc.iceConnectionState;
+        if (state === 'connected' || state === 'completed') {
+            clearTimeout(disconnectedTimer);
+            disconnectedTimer = undefined;
+            return;
+        }
+        if (state === 'failed') {
+            clearTimeout(disconnectedTimer);
+            disconnectedTimer = undefined;
+            attemptRestart('connection failed');
+            return;
+        }
+        if (state === 'disconnected' && !disconnectedTimer) {
+            disconnectedTimer = setTimeout(() => {
+                disconnectedTimer = undefined;
+                if (pc.iceConnectionState === 'disconnected') attemptRestart('still disconnected');
+            }, ICE_DISCONNECTED_DEBOUNCE_MS);
+        }
     });
 }
 
@@ -141,6 +224,14 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
     // it doesn't assume the old transport is salvageable.
     const [reconnectNonce, setReconnectNonce] = useState(0);
     const reconnectDelayMsRef = useRef(1000);
+    // A WebSocket blip mid-call used to tear the live call down along with
+    // the transport — reconnectNonce's cleanup calls userAgent.stop(),
+    // which (even with sip.js's default gracefulShutdown) synchronously
+    // disposes the session's RTCPeerConnection, killing real, still-flowing
+    // audio just because *signaling* dropped. Set true instead of bumping
+    // reconnectNonce while a call is in progress; the effect below fires
+    // the deferred reconnect once the call actually ends.
+    const pendingReconnectRef = useRef(false);
 
     // Single source of truth for "is this agent mid-call right now" — kept
     // in sync here since incomingCall/outgoingCall/activeCall all live in
@@ -169,11 +260,17 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
         };
     }, []);
 
-    const handleSessionEstablished = useCallback((session: Session, remoteNumber: string) => {
-        if (remoteAudioRef.current) attachRemoteAudio(session, remoteAudioRef.current);
-        watchIceConnection(session);
-        setActiveCall({ session, remoteNumber, muted: false, held: false, startedAt: Date.now() });
-    }, []);
+    const handleSessionEstablished = useCallback(
+        (session: Session, remoteNumber: string) => {
+            if (remoteAudioRef.current) attachRemoteAudio(session, remoteAudioRef.current);
+            watchIceConnection(session, () =>
+                showToast('Call audio may have been lost — confirm with the customer or end and redial', 'error')
+            );
+            watchLocalTrackHealth(session);
+            setActiveCall({ session, remoteNumber, muted: false, held: false, startedAt: Date.now() });
+        },
+        [showToast]
+    );
 
     const handleSessionTerminated = useCallback(() => {
         // The <audio> element persists across calls (it's created once per
@@ -316,14 +413,30 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
                     onDisconnect: err => {
                         console.warn('[softphone] transport disconnected:', err?.message);
                         setRegistrationState('unregistered');
+
+                        // Bumping reconnectNonce tears the whole effect down
+                        // and rebuilds it (fresh UserAgent) via the cleanup
+                        // below — including userAgent.stop(), which
+                        // synchronously kills any live call's
+                        // RTCPeerConnection even though the call's actual
+                        // audio (SRTP) doesn't travel over this WebSocket at
+                        // all and is very likely still fine. Deferred until
+                        // the call ends (see the pendingReconnectRef effect
+                        // below) rather than torn down immediately.
+                        if (isCallInProgress()) {
+                            if (!pendingReconnectRef.current) {
+                                pendingReconnectRef.current = true;
+                                showToast('Connection to server lost — call audio should be unaffected; reconnecting once this call ends', 'error');
+                            }
+                            return;
+                        }
+
                         showToast('Softphone connection lost — reconnecting…', 'error');
 
                         // Exponential backoff (capped at 30s), reset to 1s on
                         // the next successful registration below — recovers
                         // a brief blip fast without hammering the server
-                        // through a sustained outage. Bumping reconnectNonce
-                        // tears this whole effect down and re-runs it from
-                        // scratch (fresh credentials, fresh UserAgent).
+                        // through a sustained outage.
                         const delay = reconnectDelayMsRef.current;
                         reconnectDelayMsRef.current = Math.min(reconnectDelayMsRef.current * 2, 30000);
                         reconnectTimer = setTimeout(() => {
@@ -383,6 +496,7 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
         return () => {
             cancelled = true;
             clearTimeout(reconnectTimer);
+            pendingReconnectRef.current = false;
             registererRef.current?.unregister().catch(() => {});
             userAgentRef.current?.stop().catch(() => {});
             userAgentRef.current = null;
@@ -391,6 +505,17 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [user?.agentId, reconnectNonce]);
 
+    // Fires the reconnect that onDisconnect/handleVisibilityChange deferred
+    // while a call was in progress, the moment the call actually ends.
+    useEffect(() => {
+        const inCall = !!(incomingCall || outgoingCall || activeCall);
+        if (!inCall && pendingReconnectRef.current) {
+            pendingReconnectRef.current = false;
+            reconnectDelayMsRef.current = 1000;
+            setReconnectNonce(n => n + 1);
+        }
+    }, [incomingCall, outgoingCall, activeCall]);
+
     // A tab backgrounded long enough for the browser to throttle its timers
     // can leave the connection dead well before the backoff schedule above
     // would have noticed on its own — jumping straight to a fresh reconnect
@@ -398,11 +523,19 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
     // waiting out whatever delay happened to be pending.
     useEffect(() => {
         function handleVisibilityChange() {
-            if (document.visibilityState === 'visible' && registrationState !== 'registered') {
-                console.log('[softphone] tab visible again while disconnected — forcing a fresh reconnect');
-                reconnectDelayMsRef.current = 1000;
-                setReconnectNonce(n => n + 1);
+            if (document.visibilityState !== 'visible' || registrationState === 'registered') return;
+
+            // Same reasoning as onDisconnect above — don't tear down a live
+            // call's transport just to force a signaling reconnect. Deferred
+            // via pendingReconnectRef, fired once the call ends.
+            if (isCallInProgress()) {
+                pendingReconnectRef.current = true;
+                return;
             }
+
+            console.log('[softphone] tab visible again while disconnected — forcing a fresh reconnect');
+            reconnectDelayMsRef.current = 1000;
+            setReconnectNonce(n => n + 1);
         }
         document.addEventListener('visibilitychange', handleVisibilityChange);
         return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
