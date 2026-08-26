@@ -149,11 +149,12 @@ app.post('/events', webhookLimiter, verifyAtWebhookSecret, async (req, res) => {
     // enterQueue/bridgeAgentLeg), which knows for certain when a Dequeue-
     // equivalent bridge actually happens; this only guards against this
     // handler racing ahead of that.
-    const { data: existingRow } = await supabase
+    const { data: existingRow, error: existingRowError } = await supabase
         .from('call_logs')
         .select('status')
         .eq('session_id', sessionId)
         .maybeSingle();
+    if (existingRowError) console.error('❌ /events: failed to read existing call_logs row:', existingRowError.message);
 
     if (existingRow?.status === 'queued' && status === 'ongoing') {
         status = 'queued';
@@ -172,10 +173,18 @@ app.post('/events', webhookLimiter, verifyAtWebhookSecret, async (req, res) => {
     const matchedAgent = agentPhones.find(a => a.normalized === destination);
 
     if (matchedAgent && (status === 'completed' || status === 'failed')) {
-        await supabase.from('agents').update({ status: 'offline' }).eq('phone', matchedAgent.phone);
+        const { error: agentStatusError } = await supabase.from('agents').update({ status: 'offline' }).eq('phone', matchedAgent.phone);
+        if (agentStatusError) console.error('❌ /events: failed to set agent offline:', agentStatusError.message);
     }
 
-    await supabase.from('call_logs').upsert({
+    // call_logs is this system's canonical record of what happened on every
+    // call — logging (not just silently proceeding) if this write fails is
+    // the difference between a rare Supabase hiccup being visible/alertable
+    // vs. losing a call's outcome with no trace anywhere. Still acks 200 to
+    // Africa's Talking regardless — AT's own webhook-retry behavior isn't
+    // well-understood/controlled by us, so this is a monitoring fix, not a
+    // retry-triggering one.
+    const { error: upsertError } = await supabase.from('call_logs').upsert({
         session_id: sessionId,
         caller,
         agent_number: matchedAgent ? destination : undefined,
@@ -183,6 +192,7 @@ app.post('/events', webhookLimiter, verifyAtWebhookSecret, async (req, res) => {
         duration: durationInSeconds,
         direction
     }, { onConflict: 'session_id' });
+    if (upsertError) console.error('❌ /events: failed to upsert call_logs:', upsertError.message);
 
     res.sendStatus(200);
 });
