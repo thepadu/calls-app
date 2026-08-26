@@ -54,15 +54,33 @@ export default function IvrEditor() {
     const [addError, setAddError] = useState('');
     const [pendingDelete, setPendingDelete] = useState<IvrOption | null>(null);
 
+    const greetingDirty =
+        greeting !== (greetingData?.greeting ?? '') ||
+        ttsVoice !== (greetingData?.tts_voice ?? '') ||
+        ttsSpeedScale !== (greetingData?.tts_speed_scale ?? 1.0);
+
     useEffect(() => {
+        // A refetch of ivr-config can be triggered by something totally
+        // unrelated to the greeting form itself (e.g. the menu-enabled
+        // toggle below, which invalidates the same query) — without this
+        // guard, that refetch silently overwrote an agent's in-progress,
+        // unsaved greeting/voice/speed edit with the server's old values.
+        if (greetingDirty) return;
         if (greetingData?.greeting !== undefined) setGreeting(greetingData.greeting);
         if (greetingData?.tts_voice !== undefined) setTtsVoice(greetingData.tts_voice ?? '');
         if (greetingData?.tts_speed_scale !== undefined) setTtsSpeedScale(greetingData.tts_speed_scale ?? 1.0);
         if (greetingData?.menu_enabled !== undefined) setMenuEnabled(!!greetingData.menu_enabled);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [greetingData]);
 
     useEffect(() => {
-        setDrafts(Object.fromEntries(options.map(o => [o.digit, o])));
+        // Never overwrite an EXISTING draft from a refetch (saving one
+        // option used to invalidate the whole list, which reset every
+        // OTHER row's in-progress unsaved edit too) — only seed a draft for
+        // an option that doesn't have one yet (a genuinely new row) or one
+        // that no longer exists on the server (dropped naturally, since
+        // only options present in `options` get an entry at all).
+        setDrafts(current => Object.fromEntries(options.map(o => [o.digit, current[o.digit] ?? o])));
     }, [options]);
 
     function invalidateOptions() {
@@ -85,11 +103,6 @@ export default function IvrEditor() {
         },
         onError: (err: unknown) => showToast(errorMessage(err), 'error')
     });
-
-    const greetingDirty =
-        greeting !== (greetingData?.greeting ?? '') ||
-        ttsVoice !== (greetingData?.tts_voice ?? '') ||
-        ttsSpeedScale !== (greetingData?.tts_speed_scale ?? 1.0);
 
     // Applies immediately on toggle (not batched with "Save greeting") —
     // same pattern as the business-hours/call-rating toggles elsewhere in
