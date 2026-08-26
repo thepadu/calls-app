@@ -77,6 +77,43 @@ async function hangupCallOnAsterisk(sessionId) {
     }
 }
 
+// Unlike syncAgentToAsterisk/hangupCallOnAsterisk above, this fails CLOSED:
+// the caller (DELETE /api/agents/:id) must not delete the agent if this
+// returns false. Provisioning failing open just means an agent isn't
+// onboarded yet (safe); deprovisioning failing open would mean a removed
+// agent keeps real, working SIP credentials on Asterisk indefinitely — a
+// genuine access-control gap, not just a UX inconvenience.
+async function deprovisionAgentOnAsterisk(agentId) {
+    const internalUrl = process.env.ARI_APP_INTERNAL_URL;
+    const internalSecret = process.env.ARI_APP_INTERNAL_SECRET;
+    if (!internalUrl || !internalSecret) {
+        console.error('❌ ARI_APP_INTERNAL_URL/ARI_APP_INTERNAL_SECRET not configured — cannot revoke SIP access on Asterisk');
+        return { ok: false };
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), INTERNAL_SYNC_TIMEOUT_MS);
+    try {
+        const response = await fetch(`${internalUrl}/internal/deprovision-agent`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Chumz-Internal-Secret': internalSecret },
+            body: JSON.stringify({ agentId }),
+            signal: controller.signal
+        });
+        if (!response.ok) {
+            const body = await response.text().catch(() => '');
+            console.error(`❌ ari-app deprovision-agent responded ${response.status}: ${body}`);
+            return { ok: false };
+        }
+        return { ok: true };
+    } catch (err) {
+        console.error('❌ Failed to reach ari-app to revoke SIP access:', err.message);
+        return { ok: false };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 // Must match ari-app/supabase.js's GHOST_AGENT_STALE_MS — this is only used
 // to keep the topbar's "N agents live" count from overcounting a dead tab
 // during the window before that sweep flips it back to offline, not to
@@ -780,8 +817,12 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
     // extra endpoint work.
     app.post('/api/calls/active/add-party', requireAuth, async (req, res) => {
         const { destination } = req.body;
-        if (typeof destination !== 'string' || !destination.trim()) {
-            return res.status(400).json({ error: 'Destination is required' });
+        // Same isValidE164 check every other phone field in this codebase
+        // gets (POST/PATCH /api/agents) — this one was missing it, letting
+        // any agent hand Asterisk an arbitrary string to originate a real,
+        // billed leg to (a premium-rate number, anything).
+        if (typeof destination !== 'string' || !isValidE164(destination.trim())) {
+            return res.status(400).json({ error: 'Enter a valid phone number (e.g. +254712345678)' });
         }
 
         const agentQuery = req.user.agentId
@@ -822,18 +863,31 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         if (!call) {
             return res.status(400).json({ error: 'No active call' });
         }
-        if (['requested', 'dialing'].includes(call.add_party_status)) {
-            return res.status(409).json({ error: 'Already adding a party to this call' });
-        }
 
-        const { error } = await supabase
+        // Atomic — the earlier read of call.add_party_status above is only
+        // used to find which call to target, not to gate this write; the
+        // actual guard is the .or() filter applied directly on the UPDATE
+        // itself. A separate read-then-write here was a real TOCTOU: two
+        // quick requests (a double-click, a client retry) could both pass
+        // a stale check before either wrote, and the second would silently
+        // clobber the first's destination. Explicitly lists the allowed
+        // PRIOR states (never attempted, or a previous attempt already
+        // resolved) rather than negating the blocked ones, since add_party_status
+        // can legitimately be null and SQL's NOT IN has surprising NULL
+        // semantics.
+        const { data: updated, error } = await supabase
             .from('call_logs')
             .update({ add_party_destination: destination.trim(), add_party_status: 'requested' })
-            .eq('session_id', call.session_id);
+            .eq('session_id', call.session_id)
+            .or('add_party_status.is.null,add_party_status.in.(connected,left,failed)')
+            .select('session_id');
 
         if (error) {
             console.error(error);
             return res.status(500).json({ error: 'Failed to request add-party' });
+        }
+        if (!updated.length) {
+            return res.status(409).json({ error: 'Already adding a party to this call' });
         }
 
         res.json({ ok: true });
@@ -1011,7 +1065,24 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
     });
 
     app.delete('/api/agents/:id', requireSupervisor, async (req, res) => {
-        const { error } = await supabase.from('agents').delete().eq('id', req.params.id);
+        const agentId = parseInt(req.params.id, 10);
+        if (!Number.isInteger(agentId)) {
+            return res.status(400).json({ error: 'Invalid agent id' });
+        }
+
+        // Revoke real Asterisk access BEFORE deleting the roster row, and
+        // fail closed — a removed agent must never keep working SIP
+        // credentials just because ari-app was briefly unreachable. This
+        // no-ops cleanly (still `ok: true` on the ari-app side) for a
+        // legacy phone-only agent who was never SIP-provisioned at all.
+        const deprovisionResult = await deprovisionAgentOnAsterisk(agentId);
+        if (!deprovisionResult.ok) {
+            return res.status(502).json({
+                error: "Couldn't confirm this agent's phone system access was revoked — the agent was NOT removed. Try again shortly."
+            });
+        }
+
+        const { error } = await supabase.from('agents').delete().eq('id', agentId);
 
         if (error) {
             console.error(error);
