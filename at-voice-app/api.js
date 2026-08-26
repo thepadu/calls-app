@@ -40,6 +40,43 @@ async function syncAgentToAsterisk(supabase, agentId, sipUsername, sipPassword) 
     }
 }
 
+// Same shape as syncAgentToAsterisk above — a real hangup for a supervisor's
+// "Mark as ended" action, not just a database correction (see the mark-failed
+// route below for why the previous DB-only version was a real bug: it could
+// silently overwrite a genuinely live 'ongoing' call's status to 'failed'
+// while the actual call kept running).
+async function hangupCallOnAsterisk(sessionId) {
+    const internalUrl = process.env.ARI_APP_INTERNAL_URL;
+    const internalSecret = process.env.ARI_APP_INTERNAL_SECRET;
+    if (!internalUrl || !internalSecret) {
+        console.error('❌ ARI_APP_INTERNAL_URL/ARI_APP_INTERNAL_SECRET not configured — cannot reach Asterisk to hang up the call');
+        return { reachable: false };
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), INTERNAL_SYNC_TIMEOUT_MS);
+    try {
+        const response = await fetch(`${internalUrl}/internal/hangup-call`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Chumz-Internal-Secret': internalSecret },
+            body: JSON.stringify({ sessionId }),
+            signal: controller.signal
+        });
+        if (!response.ok) {
+            const body = await response.text().catch(() => '');
+            console.error(`❌ ari-app hangup-call responded ${response.status}: ${body}`);
+            return { reachable: false };
+        }
+        const data = await response.json();
+        return { reachable: true, hungUp: !!data.hungUp };
+    } catch (err) {
+        console.error('❌ Failed to reach ari-app to hang up call:', err.message);
+        return { reachable: false };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 // Must match ari-app/supabase.js's GHOST_AGENT_STALE_MS — this is only used
 // to keep the topbar's "N agents live" count from overcounting a dead tab
 // during the window before that sweep flips it back to offline, not to
@@ -351,18 +388,36 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
     });
 
     // Manual escape hatch for a call stuck showing "incoming"/"live" on the
-    // dashboard — normally cleared automatically (markMissedIfAbandoned on a
-    // real hangup, or ari-app's periodic stale-call sweep for an orphaned
-    // row), but a supervisor shouldn't have to wait out the sweep interval
-    // when they can see with their own eyes the call isn't real anymore.
-    // Scoped to the exact non-terminal statuses the live views show — never
-    // touches an already-terminal row, so this can't overwrite a real
-    // 'completed'/'failed' outcome that raced in first.
+    // dashboard. Tries a REAL hangup first (via ari-app's /internal/hangup-call
+    // — session_id is the customer channel's own Asterisk channel id) rather
+    // than just flipping the database status: LiveQueue polls every 5s, so a
+    // supervisor could click this on a row that's since been bridged to an
+    // agent ('ongoing') — a DB-only update would then claim the call ended
+    // while the real call kept running, which is exactly the bug this
+    // replaced. The database is only touched directly as a fallback, for a
+    // row with no real channel left (already hung up, or ari-app itself is
+    // unreachable) — nothing else would ever correct those otherwise.
     app.post('/api/calls/:sessionId/mark-failed', requireSupervisor, async (req, res) => {
+        const sessionId = req.params.sessionId;
+        const hangupResult = await hangupCallOnAsterisk(sessionId);
+
+        if (hangupResult.reachable && hangupResult.hungUp) {
+            // The real channel just got hung up — the existing StasisEnd
+            // pipeline (teardown()/markMissedIfAbandoned) will write the
+            // correct final call_logs status itself. Forcing it to 'failed'
+            // here would race with that and could overwrite a more accurate
+            // status (e.g. 'completed') a moment later.
+            return res.json({ ok: true, realCallEnded: true });
+        }
+
+        // Either nothing was really live (hungUp: false — a genuinely
+        // orphaned row) or ari-app couldn't be reached at all — in both
+        // cases, correct the database directly so the row doesn't stay
+        // stuck, but say plainly which one happened.
         const { data, error } = await supabase
             .from('call_logs')
             .update({ status: 'failed' })
-            .eq('session_id', req.params.sessionId)
+            .eq('session_id', sessionId)
             .in('status', ['ivr_started', 'input_received', 'queued', 'dialing', 'ongoing'])
             .select('session_id');
 
@@ -374,7 +429,13 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
             return res.status(404).json({ error: 'Call not found or already resolved' });
         }
 
-        res.json({ ok: true });
+        res.json({
+            ok: true,
+            realCallEnded: false,
+            reason: hangupResult.reachable
+                ? 'Nothing was actually live — row cleared'
+                : "Couldn't confirm the live call actually ended (Asterisk unreachable) — database corrected only"
+        });
     });
 
     // ── Dashboard: calls by hour ─────────────────────────────────────────
@@ -1243,6 +1304,12 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         if (req.query.session_id) query = query.eq('session_id', req.query.session_id);
         if (req.query.status) query = query.eq('status', req.query.status);
         if (req.query.tag) query = query.eq('tag', req.query.tag);
+        // Matches caller number OR name — same .or()/sanitization pattern as
+        // GET /api/agents (strip characters PostgREST's filter syntax treats
+        // as structural, so a search term containing them fails to match
+        // instead of corrupting the filter string).
+        const q = (typeof req.query.q === 'string' ? req.query.q : '').trim().replace(/[,()]/g, '');
+        if (q) query = query.or(`caller_number.ilike.%${q}%,caller_name.ilike.%${q}%`);
 
         const { data, error, count } = await query;
 

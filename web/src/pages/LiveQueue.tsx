@@ -52,14 +52,14 @@ export default function LiveQueue() {
     const calls: QueuedCall[] = queueData?.calls ?? [];
     const stats = queueData?.stats ?? { inQueue: 0, avgWaitSeconds: 0, longestWaitSeconds: 0 };
 
-    // A stuck row normally clears itself (a real hangup, or ari-app's
-    // periodic stale-call sweep for an orphaned one) — this is strictly a
-    // supervisor escape hatch for "I can see this isn't real, don't make me
-    // wait out the sweep interval," not a general call-control action.
+    // Tries a real hangup on Asterisk first (see the backend route) — a
+    // stuck-looking row usually clears itself on its own, but a supervisor
+    // shouldn't have to wait when they can see with their own eyes it isn't
+    // real anymore, or need to actually force-end a call that's gone wrong.
     const clearCall = useMutation({
         mutationFn: (sessionId: string) => apiFetch(`/api/calls/${sessionId}/mark-failed`, { method: 'POST' }),
-        onSuccess: () => {
-            showToast('Call cleared');
+        onSuccess: (data: { realCallEnded: boolean; reason?: string }) => {
+            showToast(data.realCallEnded ? 'Call ended' : (data.reason ?? 'Row cleared'));
             queryClient.invalidateQueries({ queryKey: ['queue'] });
         },
         onError: (err: unknown) => showToast(errorMessage(err), 'error'),
@@ -91,7 +91,7 @@ export default function LiveQueue() {
                 <p className="hint">
                     Waiting callers ring every available agent's browser at once — first to answer gets
                     the call. This page is mainly for visibility into who's waiting
-                    {isSupervisor && ' — supervisors can also clear a call that\'s no longer real'}.
+                    {isSupervisor && ' — supervisors can also end a call from here if something has gone wrong'}.
                 </p>
 
                 <table>
@@ -119,7 +119,7 @@ export default function LiveQueue() {
                                 {isSupervisor && (
                                     <td>
                                         <button className="btn btn-link btn-link-danger" onClick={() => setPendingClear(call)}>
-                                            Mark as ended
+                                            End call
                                         </button>
                                     </td>
                                 )}
@@ -131,9 +131,9 @@ export default function LiveQueue() {
 
             <ConfirmDialog
                 open={!!pendingClear}
-                title="Mark call as ended"
-                message={`Mark ${pendingClear?.caller}'s call as ended? Only do this if the call isn't actually real anymore — e.g. it's been stuck showing here well past a normal wait.`}
-                confirmLabel="Mark as ended"
+                title="End this call"
+                message={`End ${pendingClear?.caller}'s call? If it's genuinely still live, this actually hangs it up for the agent and caller — not just a database correction. Use this for a call stuck here past a normal wait, or one that needs to be force-ended.`}
+                confirmLabel="End call"
                 danger
                 onConfirm={() => pendingClear && clearCall.mutate(pendingClear.session_id)}
                 onCancel={() => setPendingClear(null)}
