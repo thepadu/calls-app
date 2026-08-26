@@ -38,6 +38,7 @@ const {
     reconcileGhostAgents,
     sweepStaleCalls
 } = require('./supabase');
+const { writeAgentBlock } = require('./pjsipConfig');
 
 // ari-client's error objects don't reliably carry a string .message — for at
 // least some ARI REST error responses (e.g. a 404 against a channel that
@@ -139,15 +140,120 @@ let holdingBridgeCreation; // in-flight bridges.create() promise — see getHold
 // calls could actually be handled.
 let ariHealthy = false;
 const HEALTH_PORT = process.env.ARI_HEALTH_PORT || 3001;
-http.createServer((req, res) => {
-    if (req.url === '/healthz') {
+const INTERNAL_SECRET = process.env.ARI_APP_INTERNAL_SECRET;
+
+// Constant-time comparison for the shared secret gating /internal/* — a
+// plain !== leaks timing info proportional to how many leading characters
+// match, which matters here since this endpoint writes system config and
+// is reachable from the public internet (via Caddy) once DO's own static
+// IP-less egress rules out IP allowlisting as the real access control.
+// crypto.timingSafeEqual itself throws on mismatched buffer lengths, so
+// the length check has to happen first, not be replaced by it.
+function safeEqual(a, b) {
+    const bufA = Buffer.from(String(a ?? ''));
+    const bufB = Buffer.from(String(b ?? ''));
+    return bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
+}
+
+function readJsonBody(req, maxBytes = 4096) {
+    return new Promise((resolve, reject) => {
+        let size = 0;
+        const chunks = [];
+        req.on('data', chunk => {
+            size += chunk.length;
+            if (size > maxBytes) {
+                reject(new Error('Request body too large'));
+                req.destroy();
+                return;
+            }
+            chunks.push(chunk);
+        });
+        req.on('end', () => {
+            try {
+                resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {});
+            } catch {
+                reject(new Error('Invalid JSON body'));
+            }
+        });
+        req.on('error', reject);
+    });
+}
+
+const SIP_USERNAME_RE = /^[a-z][a-z0-9]{0,31}$/;
+const SIP_PASSWORD_RE = /^[A-Za-z0-9_-]{16,64}$/;
+
+// Starts immediately (not inside main()) so it can answer while the process
+// is still connecting, or after ari.connect() has failed — distinguishing
+// "process down" (connection refused) from "process up but not routing
+// calls" (200 with ariHealthy: false) is the whole point. Previously this
+// process had no HTTP surface at all, so an external monitor could only
+// check the unrelated dashboard app and never learn anything about whether
+// calls could actually be handled.
+//
+// Bound to localhost only — Caddy (on the VPS, in front of this) is the
+// only intended public entry point, now that this server also carries the
+// privileged /internal/provision-agent route below.
+http.createServer(async (req, res) => {
+    if (req.method === 'GET' && req.url === '/healthz') {
         res.writeHead(ariHealthy ? 200 : 503, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ariConnected: ariHealthy }));
         return;
     }
+
+    if (req.method === 'POST' && req.url === '/internal/provision-agent') {
+        if (!INTERNAL_SECRET || !safeEqual(req.headers['x-chumz-internal-secret'], INTERNAL_SECRET)) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Unauthorized' }));
+            return;
+        }
+
+        let body;
+        try {
+            body = await readJsonBody(req);
+        } catch (err) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+            return;
+        }
+
+        const { agentId, sipUsername, sipPassword } = body;
+        // Validated here even though the caller (the dashboard's API) is
+        // the one generating these values — this endpoint, not the caller,
+        // is the actual boundary against writing malformed/malicious
+        // content into pjsip.conf, and that boundary shouldn't rely on the
+        // caller having stayed well-behaved.
+        if (!Number.isInteger(agentId) || agentId <= 0) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Invalid agentId' }));
+            return;
+        }
+        if (typeof sipUsername !== 'string' || !SIP_USERNAME_RE.test(sipUsername)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Invalid sipUsername' }));
+            return;
+        }
+        if (typeof sipPassword !== 'string' || !SIP_PASSWORD_RE.test(sipPassword)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Invalid sipPassword' }));
+            return;
+        }
+
+        try {
+            const result = await writeAgentBlock({ agentId, sipUsername, sipPassword });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, ...result }));
+        } catch (err) {
+            const status = err.code === 'BLOCK_CONFLICT' ? 409 : 500;
+            console.error('❌ provision-agent failed:', errText(err));
+            res.writeHead(status, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: errText(err) }));
+        }
+        return;
+    }
+
     res.writeHead(404);
     res.end();
-}).listen(HEALTH_PORT, () => console.log(`🩺 Health check listening on :${HEALTH_PORT}/healthz`));
+}).listen(HEALTH_PORT, '127.0.0.1', () => console.log(`🩺 Health check listening on :${HEALTH_PORT}/healthz`));
 
 // Kenya has a single timezone with no DST (EAT, UTC+3) — not worth a tz
 // library dependency for that. active_days is 0=Sunday..6=Saturday.

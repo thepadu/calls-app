@@ -1,5 +1,44 @@
+const crypto = require('crypto');
 const { isValidE164, normalizePhone } = require('./lib/phone');
 const { invalidateAgentCache } = require('./lib/agentCache');
+
+// A cross-VPS call to ari-app's internal provisioning endpoint (see Track B
+// of the SIP-provisioning plan) — mirrors the SUPABASE_TIMEOUT_MS pattern
+// already used on the ari-app side (ari-app/supabase.js): a hung WAN call
+// must not hang the supervisor's request indefinitely.
+const INTERNAL_SYNC_TIMEOUT_MS = 10000;
+
+async function syncAgentToAsterisk(supabase, agentId, sipUsername, sipPassword) {
+    const internalUrl = process.env.ARI_APP_INTERNAL_URL;
+    const internalSecret = process.env.ARI_APP_INTERNAL_SECRET;
+    if (!internalUrl || !internalSecret) {
+        console.error('❌ ARI_APP_INTERNAL_URL/ARI_APP_INTERNAL_SECRET not configured — cannot sync SIP credentials to Asterisk');
+        return { ok: false };
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), INTERNAL_SYNC_TIMEOUT_MS);
+    try {
+        const response = await fetch(`${internalUrl}/internal/provision-agent`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Chumz-Internal-Secret': internalSecret },
+            body: JSON.stringify({ agentId, sipUsername, sipPassword }),
+            signal: controller.signal
+        });
+        if (!response.ok) {
+            const body = await response.text().catch(() => '');
+            console.error(`❌ ari-app provision-agent responded ${response.status}: ${body}`);
+            return { ok: false };
+        }
+        await supabase.from('agent_sip_credentials').update({ asterisk_synced_at: new Date().toISOString() }).eq('agent_id', agentId);
+        return { ok: true };
+    } catch (err) {
+        console.error('❌ Failed to sync SIP credentials to Asterisk:', err.message);
+        return { ok: false };
+    } finally {
+        clearTimeout(timer);
+    }
+}
 
 // Must match ari-app/supabase.js's GHOST_AGENT_STALE_MS — this is only used
 // to keep the topbar's "N agents live" count from overcounting a dead tab
@@ -775,7 +814,14 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         // string instead of just failing to match anything.
         const q = (typeof req.query.q === 'string' ? req.query.q : '').trim().replace(/[,()]/g, '');
 
-        let query = supabase.from('agents').select('*', { count: 'exact' }).order('id', { ascending: true });
+        // agent_sip_credentials(...) lets the roster show provisioning state
+        // per agent (no softphone / pending sync / active) — sip_password is
+        // deliberately never selected here; the only place a password may
+        // ever surface is the agent's own GET /api/agents/me/sip-credentials.
+        let query = supabase
+            .from('agents')
+            .select('*, agent_sip_credentials(sip_username, provisioned_by_email, asterisk_synced_at, created_at)', { count: 'exact' })
+            .order('id', { ascending: true });
         // Matches name OR phone — searching against two columns needs an
         // .or() rather than chained .ilike() calls (which would AND them).
         if (q) query = query.or(`name.ilike.%${q}%,phone.ilike.%${q}%`);
@@ -886,6 +932,96 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
 
         invalidateAgentCache();
         res.json({ ok: true });
+    });
+
+    // Provisions a browser softphone for an agent end-to-end: generates
+    // credentials, saves them, and pushes them to the Asterisk VPS via
+    // ari-app's internal endpoint — replacing what used to require SSH +
+    // hand-editing pjsip.conf. Never returns sip_password; credential
+    // hand-off stays exclusively through the agent's own
+    // GET /api/agents/me/sip-credentials (below), matching the existing
+    // "supervisor never sees/copies a plaintext password" rule for this table.
+    app.post('/api/agents/:id/sip-credentials', requireSupervisor, async (req, res) => {
+        const agentId = parseInt(req.params.id, 10);
+        if (!Number.isInteger(agentId)) {
+            return res.status(400).json({ error: 'Invalid agent id' });
+        }
+
+        const { data: agent, error: agentError } = await supabase.from('agents').select('id, name').eq('id', agentId).maybeSingle();
+        if (agentError) {
+            console.error(agentError);
+            return res.status(500).json({ error: 'Failed to load agent' });
+        }
+        if (!agent) {
+            return res.status(404).json({ error: 'Agent not found' });
+        }
+
+        const { data: existing } = await supabase.from('agent_sip_credentials').select('agent_id').eq('agent_id', agentId).maybeSingle();
+        if (existing) {
+            return res.status(409).json({ error: 'This agent already has softphone credentials' });
+        }
+
+        // Server-derived only, no supervisor input — matches the manual
+        // convention already used in pjsip.conf (first name, lowercase,
+        // e.g. [simon]). A real collision (two agents sharing a first name)
+        // is resolved deterministically by suffixing the numeric id, rather
+        // than by asking the supervisor to pick — this endpoint takes no
+        // free-text fields at all.
+        const sanitized = (agent.name || '').trim().split(/\s+/)[0].toLowerCase().replace(/[^a-z0-9]/g, '');
+        const baseUsername = /^[a-z]/.test(sanitized) ? sanitized.slice(0, 28) : `agent${agentId}`;
+        const { data: usernameClash } = await supabase.from('agent_sip_credentials').select('agent_id').eq('sip_username', baseUsername).maybeSingle();
+        const sipUsername = usernameClash ? `${baseUsername}${agentId}`.slice(0, 32) : baseUsername;
+
+        // base64url avoids characters (=, +, /) that are structurally
+        // meaningful in pjsip.conf's ini format — defense in depth even
+        // though this value never comes from free text.
+        const sipPassword = crypto.randomBytes(18).toString('base64url');
+
+        const { error: insertError } = await supabase.from('agent_sip_credentials').insert({
+            agent_id: agentId,
+            sip_username: sipUsername,
+            sip_password: sipPassword,
+            provisioned_by_email: req.user.email
+        });
+
+        if (insertError) {
+            console.error(insertError);
+            return res.status(500).json({ error: 'Failed to save SIP credentials' });
+        }
+
+        const syncResult = await syncAgentToAsterisk(supabase, agentId, sipUsername, sipPassword);
+        // 202 (not 500) when only the Asterisk push failed — the DB row is
+        // real and retryable via the /sync endpoint below, so this isn't a
+        // failed request, just an incomplete one.
+        res.status(syncResult.ok ? 201 : 202).json({ ok: true, agentId, sipUsername, asteriskSynced: syncResult.ok });
+    });
+
+    // Idempotent retry for the split-failure case above: re-reads the
+    // already-saved credentials and re-pushes them, rather than requiring
+    // the original request's in-memory context (which a DO App Platform
+    // process recycle would lose anyway).
+    app.post('/api/agents/:id/sip-credentials/sync', requireSupervisor, async (req, res) => {
+        const agentId = parseInt(req.params.id, 10);
+        if (!Number.isInteger(agentId)) {
+            return res.status(400).json({ error: 'Invalid agent id' });
+        }
+
+        const { data: creds, error } = await supabase
+            .from('agent_sip_credentials')
+            .select('sip_username, sip_password')
+            .eq('agent_id', agentId)
+            .maybeSingle();
+
+        if (error) {
+            console.error(error);
+            return res.status(500).json({ error: 'Failed to load SIP credentials' });
+        }
+        if (!creds) {
+            return res.status(404).json({ error: 'No softphone credentials provisioned for this agent yet' });
+        }
+
+        const syncResult = await syncAgentToAsterisk(supabase, agentId, creds.sip_username, creds.sip_password);
+        res.status(syncResult.ok ? 200 : 202).json({ ok: true, agentId, asteriskSynced: syncResult.ok });
     });
 
     // ── IVR menu (supervisors only) ─────────────────────────────────────

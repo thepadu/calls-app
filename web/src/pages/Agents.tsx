@@ -21,6 +21,7 @@ type Agent = {
     email: string | null;
     status: 'available' | 'on_call' | 'ringing' | 'break' | 'offline';
     role: 'agent' | 'supervisor';
+    agent_sip_credentials: { sip_username: string; asterisk_synced_at: string | null } | null;
 };
 
 const EMPTY_FORM = { name: '', phone: '', email: '', role: 'agent' as Agent['role'] };
@@ -118,6 +119,32 @@ export default function Agents() {
         onSettled: () => setPendingDelete(null)
     });
 
+    // Provisions a browser softphone end-to-end — generates credentials and
+    // pushes them to the Asterisk VPS via ari-app's internal endpoint. Never
+    // surfaces sip_password here; an agent fetches their own credentials
+    // via GET /api/agents/me/sip-credentials once provisioned.
+    const provisionSip = useMutation({
+        mutationFn: (id: number) => apiFetch(`/api/agents/${id}/sip-credentials`, { method: 'POST' }),
+        onSuccess: (data: { asteriskSynced: boolean }) => {
+            showToast(data.asteriskSynced ? 'Softphone provisioned' : 'Credentials saved — Asterisk sync pending, retry below');
+            invalidate();
+        },
+        onError: (err: unknown) => showToast(errorMessage(err), 'error')
+    });
+
+    const syncSip = useMutation({
+        mutationFn: (id: number) => apiFetch(`/api/agents/${id}/sip-credentials/sync`, { method: 'POST' }),
+        onSuccess: (data: { asteriskSynced: boolean }) => {
+            showToast(data.asteriskSynced ? 'Softphone synced' : 'Still not reachable — will need another retry');
+            invalidate();
+        },
+        onError: (err: unknown) => showToast(errorMessage(err), 'error')
+    });
+
+    function errorMessage(err: unknown) {
+        return err instanceof Error ? err.message : 'Something went wrong';
+    }
+
     function openAddForm() {
         setEditingId(null);
         setForm(EMPTY_FORM);
@@ -192,6 +219,26 @@ export default function Agents() {
                             </div>
                             <div className="agent-card-actions">
                                 <button className="btn btn-link" onClick={() => openEditForm(agent)}>Edit</button>
+                                {!agent.agent_sip_credentials && (
+                                    <button
+                                        className="btn btn-link"
+                                        onClick={() => provisionSip.mutate(agent.id)}
+                                        disabled={provisionSip.isPending}
+                                        title="Set up a browser softphone for this agent"
+                                    >
+                                        Add Softphone
+                                    </button>
+                                )}
+                                {agent.agent_sip_credentials && !agent.agent_sip_credentials.asterisk_synced_at && (
+                                    <button
+                                        className="btn btn-link"
+                                        onClick={() => syncSip.mutate(agent.id)}
+                                        disabled={syncSip.isPending}
+                                        title="Credentials saved but not yet confirmed live on Asterisk — retry the sync"
+                                    >
+                                        Sync pending — Retry
+                                    </button>
+                                )}
                                 <button className="btn btn-link btn-link-danger" onClick={() => setPendingDelete(agent)}>
                                     Remove
                                 </button>
