@@ -1012,6 +1012,13 @@ textarea {
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
+    /* Grid items default to min-width: auto, which for this column means
+       "at least as wide as the Action <select>'s longest option" (native
+       selects won't shrink below their content width) — with a long option
+       like "Transfer to an available agent," that floor was wider than
+       realistic panel widths, forcing the whole row to overflow instead of
+       letting inputs shrink to fit. This is the actual fix. */
+    min-width: 0;
 }
 
 .ivr-row-actions {
@@ -1480,6 +1487,17 @@ textarea {
 
 /* ── Settings page ────────────────────────────────────────────────── */
 
+/* Without an explicit rule, <label className="toggle-switch"> inherits the
+   generic `label { display: block; margin-bottom: 14px; ... }` rule below —
+   harmless where it's always a lone direct child of .panel-header, but a
+   silent trap for any usage (e.g. nested in a wrapper alongside a button)
+   where that inherited block/margin behavior actually shows up. */
+.toggle-switch {
+    display: inline-flex;
+    align-items: center;
+    margin-bottom: 0;
+}
+
 .toggle-switch input {
     display: none;
 }
@@ -1924,6 +1942,10 @@ textarea {
 
     .forwarding-add-row,
     .forwarding-rule-row {
+        grid-template-columns: 1fr;
+    }
+
+    .ivr-row {
         grid-template-columns: 1fr;
     }
 
