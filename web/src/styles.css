@@ -916,6 +916,28 @@ textarea {
     margin-top: var(--space-8);
 }
 
+/* ── PWA update banner ────────────────────────────────────────────── */
+/* z-index below .call-screen-stack (950) — an active call should always
+   stay visually on top of "a new version is available." */
+
+.pwa-update-banner {
+    position: fixed;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 900;
+    display: flex;
+    align-items: center;
+    gap: var(--space-12);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+    padding: var(--space-10) var(--space-12) var(--space-10) var(--space-16);
+    font-size: 13px;
+    font-weight: 600;
+}
+
 /* ── Toasts ────────────────────────────────────────────────────────── */
 
 .toast-stack {
@@ -1534,7 +1556,12 @@ textarea {
 
 .forwarding-rule-row {
     display: grid;
-    grid-template-columns: 1fr 20px 1.4fr auto;
+    /* minmax(0, Nfr), not bare Nfr — same fix as .ivr-row-fields (see its
+       comment): a bare `1.4fr` track defaults to a content-based minimum
+       width, so an unbroken destination string longer than the column
+       (free text, no length cap — a full number or a queue name typed
+       without spaces) couldn't shrink and blew the row out instead. */
+    grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1.4fr) auto;
     gap: var(--space-10);
     align-items: center;
     padding: var(--space-10) 0;
@@ -1547,7 +1574,7 @@ textarea {
 
 .forwarding-add-row {
     display: grid;
-    grid-template-columns: 1fr 1.4fr auto;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto;
     gap: var(--space-10);
     margin-top: var(--space-14);
 }

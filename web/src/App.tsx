@@ -8,6 +8,7 @@ import { ToastProvider } from './lib/toast';
 import { SoftphoneProvider } from './lib/softphone';
 import { ActiveCallProvider } from './lib/activeCall';
 import Layout from './components/layout/Layout';
+import PwaUpdatePrompt from './components/PwaUpdatePrompt';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const LiveQueue = lazy(() => import('./pages/LiveQueue'));
@@ -94,6 +95,7 @@ export default function App() {
         <QueryClientProvider client={queryClient}>
             <ThemeProvider>
                 <ToastProvider>
+                    <PwaUpdatePrompt />
                     <AuthProvider>
                         <SoftphoneProvider>
                             <ActiveCallProvider>

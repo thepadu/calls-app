@@ -1,13 +1,14 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import { registerSW } from 'virtual:pwa-register';
 import App from './App';
 import ErrorBoundary from './components/ErrorBoundary';
 import './styles.css';
 
-// autoUpdate (vite.config.ts) means a new deploy takes over silently on the
-// next natural reload — agents shouldn't have to think about app updates.
-registerSW({ immediate: true });
+// Service worker registration lives in <PwaUpdatePrompt> (mounted inside
+// App) instead of here — it needs to gate the reload behind an explicit
+// user click rather than vite-plugin-pwa's default silent auto-reload,
+// which could otherwise drop a live call or unsaved work. See that
+// component for the full reasoning.
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
     <React.StrictMode>
