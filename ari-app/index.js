@@ -257,6 +257,72 @@ http.createServer(async (req, res) => {
         return;
     }
 
+    if (req.method === 'POST' && req.url === '/internal/hangup-call') {
+        if (!INTERNAL_SECRET || !safeEqual(req.headers['x-chumz-internal-secret'], INTERNAL_SECRET)) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Unauthorized' }));
+            return;
+        }
+
+        let body;
+        try {
+            body = await readJsonBody(req);
+        } catch (err) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+            return;
+        }
+
+        const { sessionId } = body;
+        if (typeof sessionId !== 'string' || !sessionId) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Invalid sessionId' }));
+            return;
+        }
+
+        if (!client) {
+            res.writeHead(503, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'ARI not connected yet' }));
+            return;
+        }
+
+        // session_id IS the customer channel's own Asterisk channel id
+        // throughout this app (set at StasisStart, never regenerated) — so
+        // this needs no lookup through waitingQueue/ringGroupBySessionId/
+        // activeBridgeBySessionId to find "the right thing to hang up" for
+        // whichever of those states the call happens to be in right now.
+        // Hanging up the customer's own channel is exactly what the
+        // existing customer-initiated-hangup path already does, and the
+        // existing global StasisEnd handler already does all the right
+        // cleanup from there (queue splicing, ring-group clearing, and for
+        // a bridged call, teardown()'s bridge-destroy + agent-leg-hangup +
+        // agent-back-to-available + final call_logs write) — reusing that
+        // pipeline instead of duplicating any of it here.
+        try {
+            await client.channels.hangup({ channelId: sessionId });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true, hungUp: true }));
+        } catch (err) {
+            // Already gone (caller hung up first, or a genuinely stale row
+            // with nothing left) — not an error, just nothing to do.
+            // Confirmed live against the real error shape: ari-client's
+            // swaggerError wraps a 404's raw response body as a plain
+            // string Error.message (here, the literal JSON text
+            // '{\n  "message": "Channel not found"\n}\n'), not a parsed
+            // object — a substring check is what actually matches it,
+            // an exact-equality check against errText(err) does not.
+            if (errText(err).includes('Channel not found')) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ ok: true, hungUp: false }));
+                return;
+            }
+            console.error(`❌ hangup-call failed for ${sessionId}:`, errText(err));
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: errText(err) }));
+        }
+        return;
+    }
+
     res.writeHead(404);
     res.end();
 }).listen(HEALTH_PORT, '127.0.0.1', () => console.log(`🩺 Health check listening on :${HEALTH_PORT}/healthz`));
