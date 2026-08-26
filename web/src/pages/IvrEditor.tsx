@@ -47,6 +47,7 @@ export default function IvrEditor() {
     const [greeting, setGreeting] = useState('');
     const [ttsVoice, setTtsVoice] = useState<string>('');
     const [ttsSpeedScale, setTtsSpeedScale] = useState(1.0);
+    const [menuEnabled, setMenuEnabled] = useState(true);
     const [drafts, setDrafts] = useState<Record<string, IvrOption>>({});
     const [addOpen, setAddOpen] = useState(false);
     const [addForm, setAddForm] = useState(EMPTY_FORM);
@@ -57,6 +58,7 @@ export default function IvrEditor() {
         if (greetingData?.greeting !== undefined) setGreeting(greetingData.greeting);
         if (greetingData?.tts_voice !== undefined) setTtsVoice(greetingData.tts_voice ?? '');
         if (greetingData?.tts_speed_scale !== undefined) setTtsSpeedScale(greetingData.tts_speed_scale ?? 1.0);
+        if (greetingData?.menu_enabled !== undefined) setMenuEnabled(!!greetingData.menu_enabled);
     }, [greetingData]);
 
     useEffect(() => {
@@ -88,6 +90,27 @@ export default function IvrEditor() {
         greeting !== (greetingData?.greeting ?? '') ||
         ttsVoice !== (greetingData?.tts_voice ?? '') ||
         ttsSpeedScale !== (greetingData?.tts_speed_scale ?? 1.0);
+
+    // Applies immediately on toggle (not batched with "Save greeting") —
+    // same pattern as the business-hours/call-rating toggles elsewhere in
+    // this app. When disabled, callers hear only the greeting and go
+    // straight to the queue (ari-app's runIvrMenu) — no digit-press menu.
+    const toggleMenuEnabled = useMutation({
+        mutationFn: (enabled: boolean) => apiFetch('/api/ivr-config', { method: 'PATCH', body: JSON.stringify({ menu_enabled: enabled }) }),
+        onSuccess: (_data, enabled) => {
+            showToast(enabled ? 'Menu enabled' : 'Menu disabled — callers now hear only the greeting');
+            queryClient.invalidateQueries({ queryKey: ['ivr-config'] });
+        },
+        onError: (err: unknown) => {
+            showToast(errorMessage(err), 'error');
+            setMenuEnabled(current => !current); // roll back the optimistic toggle
+        }
+    });
+
+    function handleMenuEnabledChange(checked: boolean) {
+        setMenuEnabled(checked);
+        toggleMenuEnabled.mutate(checked);
+    }
 
     const saveOption = useMutation({
         mutationFn: (digit: string) => {
@@ -193,9 +216,23 @@ export default function IvrEditor() {
                 <div className="panel">
                     <div className="panel-header">
                         <h3>Menu options</h3>
-                        <button className="btn btn-primary" onClick={() => setAddOpen(true)}>+ Add option</button>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                            <label className="toggle-switch" title={menuEnabled ? 'Menu is on' : 'Menu is off — callers hear only the greeting'}>
+                                <input
+                                    type="checkbox"
+                                    checked={menuEnabled}
+                                    onChange={e => handleMenuEnabledChange(e.target.checked)}
+                                />
+                                <span className="toggle-track"><span className="toggle-knob" /></span>
+                            </label>
+                            <button className="btn btn-primary" onClick={() => setAddOpen(true)}>+ Add option</button>
+                        </div>
                     </div>
-                    <p className="hint">This is exactly what callers hear — edits take effect on the next call.</p>
+                    <p className="hint">
+                        {menuEnabled
+                            ? 'This is exactly what callers hear — edits take effect on the next call.'
+                            : 'Menu is off — callers hear only the greeting, then go straight to the queue. Options below are kept but not played.'}
+                    </p>
                     {optionsIsError && (
                         <p className="error">
                             Couldn&apos;t load the menu ({errorMessage(optionsError)}).{' '}
@@ -320,7 +357,11 @@ export default function IvrEditor() {
             <ConfirmDialog
                 open={!!pendingDelete}
                 title="Remove IVR option"
-                message={`Remove option ${pendingDelete?.digit} ("${pendingDelete?.label}")? Callers who press ${pendingDelete?.digit} will hear "Invalid input" until you add another.`}
+                message={
+                    options.length === 1
+                        ? `Remove option ${pendingDelete?.digit} ("${pendingDelete?.label}")? This is the last remaining option — callers will hear only the greeting and go straight to the queue, same as turning the menu off.`
+                        : `Remove option ${pendingDelete?.digit} ("${pendingDelete?.label}")? Callers who press ${pendingDelete?.digit} will hear "Invalid input" until you add another.`
+                }
                 confirmLabel="Remove"
                 danger
                 onConfirm={() => pendingDelete && deleteOption.mutate(pendingDelete.digit)}

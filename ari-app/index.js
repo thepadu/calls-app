@@ -80,8 +80,14 @@ const ADD_PARTY_POLL_MS = 3000;
 // abandoned). 20 minutes is short enough to clear orphans quickly; a real
 // call still running past that isn't harmed — its own eventual completion
 // write overwrites this by session_id regardless.
-const STALE_CALL_MAX_AGE_MS = 20 * 60 * 1000;
-const STALE_CALL_SWEEP_MS = 5 * 60 * 1000;
+const STALE_CALL_ONGOING_MAX_AGE_MS = 20 * 60 * 1000;
+// A caller stuck in ivr_started/input_received/queued/dialing — never yet
+// bridged to an agent — for anywhere near this long is already a service
+// failure on its own, independent of the orphan-detection reasoning above;
+// kept far shorter than the 'ongoing' threshold, which a real long call
+// can legitimately exceed.
+const STALE_CALL_PREBRIDGE_MAX_AGE_MS = 5 * 60 * 1000;
+const STALE_CALL_SWEEP_MS = 2 * 60 * 1000;
 const ARI_HEARTBEAT_MS = 15000;
 const ARI_HEARTBEAT_TIMEOUT_MS = 5000;
 const GHOST_AGENT_POLL_MS = 30000;
@@ -407,9 +413,22 @@ async function runIvrMenu(channel, sessionId) {
     const { greeting, ttsVoice, ttsSpeedScale } = ivrConfig;
     const voiceOpts = { voiceKey: ttsVoice, speedScale: ttsSpeedScale };
 
-    const menuText = options.length
-        ? `${greeting.trim()} ${options.map(o => `Press ${o.digit} for ${o.label}.`).join(' ')}`
-        : `${greeting.trim()} Our menu is temporarily unavailable, please try again shortly.`;
+    // Menu deliberately disabled (menu_enabled=false), or a supervisor left
+    // zero options configured — either way there's no usable menu to play.
+    // Previously this recursed into itself forever (every branch below
+    // eventually calls runIvrMenu again, and options.find() can never match
+    // with an empty list), leaving a caller stuck hearing the greeting +
+    // "temporarily unavailable"/"invalid input" on a ~15-20s loop
+    // indefinitely. Both cases collapse into the same safe path: play the
+    // greeting once, then go straight to the queue — the same "ring all
+    // available agents" path the menu's own transfer_agent option already
+    // uses below, so no new agent-routing logic is needed.
+    if (!ivrConfig.menuEnabled || options.length === 0) {
+        await playText(channel, greeting.trim(), voiceOpts);
+        return enterQueue(channel, sessionId);
+    }
+
+    const menuText = `${greeting.trim()} ${options.map(o => `Press ${o.digit} for ${o.label}.`).join(' ')}`;
 
     // Play + listen for a barge-in digit concurrently — a caller shouldn't
     // have to wait out the whole prompt before pressing a key. Whichever
@@ -1318,9 +1337,9 @@ async function main() {
     setInterval(() => tryAddPartyPoll().catch(err => console.error('❌ Add-party poll error:', err.message)), ADD_PARTY_POLL_MS);
     setInterval(
         () =>
-            sweepStaleCalls(STALE_CALL_MAX_AGE_MS)
+            sweepStaleCalls(STALE_CALL_PREBRIDGE_MAX_AGE_MS, STALE_CALL_ONGOING_MAX_AGE_MS)
                 .then(swept => {
-                    if (swept.length > 0) console.log(`🧹 Swept ${swept.length} stale call_logs row(s) (non-terminal for 20+ min)`);
+                    if (swept.length > 0) console.log(`🧹 Swept ${swept.length} stale call_logs row(s)`);
                 })
                 .catch(err => console.error('❌ Stale-call sweep poll error:', err.message)),
         STALE_CALL_SWEEP_MS

@@ -37,18 +37,21 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 async function getIvrConfig() {
     const { data, error } = await supabase
         .from('ivr_config')
-        .select('greeting, tts_voice, tts_speed_scale, rating_enabled')
+        .select('greeting, tts_voice, tts_speed_scale, rating_enabled, menu_enabled')
         .eq('id', 1)
         .single();
     if (error) {
         console.error('❌ Failed to load ivr_config:', error.message);
-        return { greeting: 'Welcome to Chumz customer support.', ttsVoice: null, ttsSpeedScale: 1.0, ratingEnabled: false };
+        // menu_enabled defaults true on error — fail toward the existing
+        // interactive-menu behavior, not toward silently skipping it.
+        return { greeting: 'Welcome to Chumz customer support.', ttsVoice: null, ttsSpeedScale: 1.0, ratingEnabled: false, menuEnabled: true };
     }
     return {
         greeting: data.greeting,
         ttsVoice: data.tts_voice,
         ttsSpeedScale: data.tts_speed_scale ?? 1.0,
-        ratingEnabled: data.rating_enabled ?? false
+        ratingEnabled: data.rating_enabled ?? false,
+        menuEnabled: data.menu_enabled ?? true
     };
 }
 
@@ -211,19 +214,40 @@ async function reconcileStaleCallsOnStartup() {
 // channel id at all. A real still-in-progress call isn't harmed by this
 // running — teardown()'s own final upsert (matched by session_id) overwrites
 // whatever this wrote the moment the call actually ends for real.
-async function sweepStaleCalls(maxAgeMs) {
-    const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
-    const { data, error } = await supabase
-        .from('call_logs')
-        .update({ status: 'failed' })
-        .in('status', ['ivr_started', 'input_received', 'queued', 'dialing', 'ongoing'])
-        .lt('created_at', cutoff)
-        .select('session_id');
-    if (error) {
-        console.error('❌ Stale-call sweep failed:', error.message);
-        return [];
-    }
-    return data ?? [];
+// Two thresholds, not one: a customer legitimately sitting in
+// ivr_started/input_received/queued/dialing (never yet bridged to an
+// agent) for anywhere near `maxAgeMs` is already a service failure on its
+// own — these should time out much sooner than an actual bridged 'ongoing'
+// call, which can legitimately run long. Confirmed live: the live/queue
+// dashboard was showing a customer as still "incoming" for up to ~20-25
+// minutes after an orphaned StasisEnd (ari-app crash/restart, or any
+// unhandled exception before the normal hangup path's upsertCallLog runs)
+// — splitting the threshold this way cuts that worst case to roughly the
+// sweep interval plus preBridgeMaxAgeMs, without touching how long a real
+// 'ongoing' call is allowed to run.
+async function sweepStaleCalls(preBridgeMaxAgeMs, ongoingMaxAgeMs) {
+    const preBridgeCutoff = new Date(Date.now() - preBridgeMaxAgeMs).toISOString();
+    const ongoingCutoff = new Date(Date.now() - ongoingMaxAgeMs).toISOString();
+
+    const [preBridgeResult, ongoingResult] = await Promise.all([
+        supabase
+            .from('call_logs')
+            .update({ status: 'failed' })
+            .in('status', ['ivr_started', 'input_received', 'queued', 'dialing'])
+            .lt('created_at', preBridgeCutoff)
+            .select('session_id'),
+        supabase
+            .from('call_logs')
+            .update({ status: 'failed' })
+            .eq('status', 'ongoing')
+            .lt('created_at', ongoingCutoff)
+            .select('session_id')
+    ]);
+
+    if (preBridgeResult.error) console.error('❌ Stale-call sweep (pre-bridge) failed:', preBridgeResult.error.message);
+    if (ongoingResult.error) console.error('❌ Stale-call sweep (ongoing) failed:', ongoingResult.error.message);
+
+    return [...(preBridgeResult.data ?? []), ...(ongoingResult.data ?? [])];
 }
 
 // This process's in-memory bridge/pending-call state always starts empty, so

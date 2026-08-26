@@ -1,0 +1,12 @@
+-- Run in the Supabase SQL editor. Idempotent (safe to re-run).
+--
+-- Lets a supervisor disable the interactive digit-press menu entirely —
+-- callers then hear only the greeting before going straight to the queue.
+-- Same shape as the existing rating_enabled column (012_call_rating.sql).
+--
+-- Also closes a real bug: runIvrMenu had no exit path when ivr_options was
+-- empty (every branch recursed back into itself), leaving a caller stuck
+-- hearing the greeting + "temporarily unavailable"/"invalid input" on a
+-- ~15-20s loop indefinitely if a supervisor ever deleted every option.
+-- Default true preserves current behavior for existing configs.
+alter table ivr_config add column if not exists menu_enabled boolean not null default true;

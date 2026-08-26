@@ -350,6 +350,33 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         });
     });
 
+    // Manual escape hatch for a call stuck showing "incoming"/"live" on the
+    // dashboard — normally cleared automatically (markMissedIfAbandoned on a
+    // real hangup, or ari-app's periodic stale-call sweep for an orphaned
+    // row), but a supervisor shouldn't have to wait out the sweep interval
+    // when they can see with their own eyes the call isn't real anymore.
+    // Scoped to the exact non-terminal statuses the live views show — never
+    // touches an already-terminal row, so this can't overwrite a real
+    // 'completed'/'failed' outcome that raced in first.
+    app.post('/api/calls/:sessionId/mark-failed', requireSupervisor, async (req, res) => {
+        const { data, error } = await supabase
+            .from('call_logs')
+            .update({ status: 'failed' })
+            .eq('session_id', req.params.sessionId)
+            .in('status', ['ivr_started', 'input_received', 'queued', 'dialing', 'ongoing'])
+            .select('session_id');
+
+        if (error) {
+            console.error(error);
+            return res.status(500).json({ error: 'Failed to update call' });
+        }
+        if (!data.length) {
+            return res.status(404).json({ error: 'Call not found or already resolved' });
+        }
+
+        res.json({ ok: true });
+    });
+
     // ── Dashboard: calls by hour ─────────────────────────────────────────
     // Must be registered before /api/calls/:sessionId below — Express
     // matches routes in registration order, and "by-hour" is itself a valid
@@ -1029,7 +1056,7 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
     app.get('/api/ivr-config', requireSupervisor, async (req, res) => {
         const { data, error } = await supabase
             .from('ivr_config')
-            .select('greeting, tts_voice, tts_speed_scale, rating_enabled')
+            .select('greeting, tts_voice, tts_speed_scale, rating_enabled, menu_enabled')
             .eq('id', 1)
             .single();
 
@@ -1042,7 +1069,8 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
             greeting: data.greeting,
             tts_voice: data.tts_voice,
             tts_speed_scale: data.tts_speed_scale,
-            rating_enabled: data.rating_enabled
+            rating_enabled: data.rating_enabled,
+            menu_enabled: data.menu_enabled
         });
     });
 
@@ -1052,7 +1080,7 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
     const IVR_VOICES = ['lady', 'man', null];
 
     app.patch('/api/ivr-config', requireSupervisor, async (req, res) => {
-        const { greeting, tts_voice, tts_speed_scale, rating_enabled } = req.body;
+        const { greeting, tts_voice, tts_speed_scale, rating_enabled, menu_enabled } = req.body;
 
         if (greeting !== undefined && (typeof greeting !== 'string' || !greeting.trim())) {
             return res.status(400).json({ error: 'Greeting cannot be empty' });
@@ -1069,6 +1097,7 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         if (tts_voice !== undefined) updates.tts_voice = tts_voice;
         if (tts_speed_scale !== undefined) updates.tts_speed_scale = tts_speed_scale;
         if (rating_enabled !== undefined) updates.rating_enabled = !!rating_enabled;
+        if (menu_enabled !== undefined) updates.menu_enabled = !!menu_enabled;
 
         const { data, error } = await supabase
             .from('ivr_config')
