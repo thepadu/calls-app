@@ -8,6 +8,7 @@ import { TICKET_STATUS_COLORS, TICKET_PRIORITY_COLORS, TICKET_STATUSES, TICKET_P
 import Pagination from '../components/Pagination';
 import ConfirmDialog from '../components/ConfirmDialog';
 import StatusDropdown from '../components/StatusDropdown';
+import { FileText } from 'lucide-react';
 
 type Call = {
     session_id: string;
@@ -111,7 +112,7 @@ export default function Tickets() {
     // this was just never wired up to anything, so a ticket's status could
     // never actually change after creation anywhere in the app.
     const updateTicket = useMutation({
-        mutationFn: ({ id, ...changes }: { id: number; status?: string; priority?: string }) =>
+        mutationFn: ({ id, ...changes }: { id: number; status?: string; priority?: string; tag?: string | null; assigned_agent_id?: number | null; notes?: string }) =>
             apiFetch(`/api/tickets/${id}`, { method: 'PATCH', body: JSON.stringify(changes) }),
         onSuccess: () => {
             showToast('Ticket updated');
@@ -119,6 +120,23 @@ export default function Tickets() {
         },
         onError: (err: unknown) => showToast(errorMessage(err), 'error')
     });
+
+    const [editingNotesTicket, setEditingNotesTicket] = useState<Ticket | null>(null);
+    const [notesDraft, setNotesDraft] = useState('');
+
+    function openNotesEditor(t: Ticket) {
+        setEditingNotesTicket(t);
+        setNotesDraft(t.notes ?? '');
+    }
+
+    function saveNotes() {
+        if (!editingNotesTicket) return;
+        updateTicket.mutate({ id: editingNotesTicket.id, notes: notesDraft }, {
+            onSuccess: () => setEditingNotesTicket(null)
+        });
+    }
+
+    const notesModalRef = useModalA11y(!!editingNotesTicket, () => setEditingNotesTicket(null));
 
     const [addTagOpen, setAddTagOpen] = useState(false);
     const [newTagName, setNewTagName] = useState('');
@@ -197,22 +215,30 @@ export default function Tickets() {
                                 <th>Priority</th>
                                 <th>Status</th>
                                 <th>Assigned</th>
+                                <th>Notes</th>
                             </tr>
                         </thead>
                         <tbody>
                             {tickets.length === 0 && (
-                                <tr><td colSpan={6} className="empty">No tickets{statusFilter || tagFilter ? ' match these filters.' : ' yet.'}</td></tr>
+                                <tr><td colSpan={7} className="empty">No tickets{statusFilter || tagFilter ? ' match these filters.' : ' yet.'}</td></tr>
                             )}
                             {tickets.map(t => (
                                 <tr key={t.id}>
                                     <td className="hint">TCK-{t.id}</td>
                                     <td>{t.caller_number ?? t.caller_name ?? '—'}</td>
-                                    <td>{t.tag ?? '—'}</td>
                                     <td>
-                                        <span className="ticket-priority">
-                                            <span className="ticket-priority-dot" style={{ background: TICKET_PRIORITY_COLORS[t.priority] ?? '#757575' }} />
-                                            {t.priority}
-                                        </span>
+                                        <select value={t.tag ?? ''} onChange={e => updateTicket.mutate({ id: t.id, tag: e.target.value || null })}>
+                                            <option value="">No tag</option>
+                                            {tags.map(tg => <option key={tg} value={tg}>{tg}</option>)}
+                                        </select>
+                                    </td>
+                                    <td>
+                                        <StatusDropdown
+                                            value={t.priority}
+                                            options={TICKET_PRIORITIES}
+                                            colors={TICKET_PRIORITY_COLORS}
+                                            onChange={priority => updateTicket.mutate({ id: t.id, priority })}
+                                        />
                                     </td>
                                     <td>
                                         <StatusDropdown
@@ -222,7 +248,25 @@ export default function Tickets() {
                                             onChange={status => updateTicket.mutate({ id: t.id, status })}
                                         />
                                     </td>
-                                    <td>{t.assigned_agent_name ?? '—'}</td>
+                                    <td>
+                                        <select
+                                            value={t.assigned_agent_id ?? ''}
+                                            onChange={e => updateTicket.mutate({ id: t.id, assigned_agent_id: e.target.value ? Number(e.target.value) : null })}
+                                        >
+                                            <option value="">Unassigned</option>
+                                            {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                                        </select>
+                                    </td>
+                                    <td>
+                                        <button
+                                            className="btn btn-link"
+                                            title={t.notes ?? 'Add notes'}
+                                            onClick={() => openNotesEditor(t)}
+                                            style={{ color: t.notes ? '#17A697' : undefined }}
+                                        >
+                                            <FileText size={16} />
+                                        </button>
+                                    </td>
                                 </tr>
                             ))}
                         </tbody>
@@ -296,6 +340,24 @@ export default function Tickets() {
                     </div>
                 )}
             </div>
+
+            {editingNotesTicket && (
+                <div className="modal-overlay" onClick={() => setEditingNotesTicket(null)}>
+                    <div ref={notesModalRef} className="modal" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
+                        <h3>Notes — TCK-{editingNotesTicket.id}</h3>
+                        <label>
+                            Notes
+                            <textarea value={notesDraft} onChange={e => setNotesDraft(e.target.value)} rows={5} placeholder="What happened on this call..." autoFocus />
+                        </label>
+                        <div className="modal-actions">
+                            <button className="btn btn-secondary" onClick={() => setEditingNotesTicket(null)}>Cancel</button>
+                            <button className="btn btn-primary" onClick={saveNotes} disabled={updateTicket.isPending}>
+                                Save
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {addTagOpen && (
                 <div className="modal-overlay" onClick={() => setAddTagOpen(false)}>
