@@ -1948,10 +1948,30 @@ textarea {
 
     .call-screen {
         padding: var(--space-22) var(--space-18);
+        /* Opening the ticket drawer on a phone pushes the combined content
+           past the viewport, forcing .call-screen-stack (the scroll
+           container) to scroll — without this, that scroll took the call
+           card with it, so reaching the ticket form meant losing sight of
+           mute/hold/hangup mid-call. Pinning the card to the top of the
+           same scroll container keeps hangup reachable at all times. */
+        position: sticky;
+        top: 0;
+        z-index: 2;
     }
 
     .ticket-drawer {
         padding: var(--space-16) var(--space-18);
+    }
+
+    /* Same reasoning as .call-screen above, for the drawer's own Close/
+       Create buttons — previously plain flow content at the end of the
+       drawer's 55vh scroll area, requiring a scroll-and-hunt to find them. */
+    .ticket-drawer .modal-actions {
+        position: sticky;
+        bottom: 0;
+        background: var(--surface);
+        padding-top: var(--space-8);
+        margin-top: 0;
     }
 
     /* Stacked in one right-aligned column instead of side-by-side, so
