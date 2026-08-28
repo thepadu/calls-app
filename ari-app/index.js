@@ -28,6 +28,7 @@ const {
     setAgentStatus,
     getAgentPhone,
     getAgentBySipUsername,
+    getAgentSipCredentials,
     getNoAgentsForwardingDestination,
     getBusinessHours,
     claimAddPartyRequests,
@@ -1003,9 +1004,15 @@ function parseSipUsername(channelName) {
 // already proven for inbound agent legs. A ring() indication gives the
 // agent real ringback audio for however long the destination actually
 // takes to pick up, instead of silence.
-async function handleOutboundAgentCall(agentChannel, destination) {
+// `internalTarget` ({ targetAgentId, sipUsername }), when present, means this
+// is an agent-to-agent call — dials the target's own PJSIP endpoint directly
+// instead of the external `destination`@at-trunk. Everything else (answer,
+// ringback, pending/StasisEnd bookkeeping, the no-answer backstop) is
+// identical between the two, so this one function stays the single place
+// that logic lives rather than being duplicated for internal calls.
+async function handleOutboundAgentCall(agentChannel, destination, internalTarget = null) {
     const sessionId = agentChannel.id;
-    const calledNumber = normalizePhone(destination);
+    const calledNumber = internalTarget ? null : normalizePhone(destination);
 
     try {
         await agentChannel.answer();
@@ -1027,7 +1034,8 @@ async function handleOutboundAgentCall(agentChannel, destination) {
         bridge: null,
         bridged: false,
         cleaned: false,
-        answeredAt: null
+        answeredAt: null,
+        noAnswerTimer: null
     };
     outboundBySessionId.set(sessionId, pending);
 
@@ -1037,15 +1045,18 @@ async function handleOutboundAgentCall(agentChannel, destination) {
         );
     });
 
+    if (pending.cleaned) return; // agent already hung up — don't dial the real destination for nothing
+
     // Gives the agent audible ringback while the destination is actually
     // ringing (confirmed via live SIP trace: the destination can genuinely
     // ring for 10+ real seconds before pickup) — without this the agent
     // hears silence the whole time, indistinguishable from "nothing is
     // happening". Stopped in completeOutboundBridge once real audio takes
-    // over, or in finishOutboundCall if the call ends before that.
-    await agentChannel.ring().catch(() => {});
-
-    if (pending.cleaned) return; // agent already hung up — don't dial the real destination for nothing
+    // over, or in finishOutboundCall if the call ends before that. Not
+    // awaited — this is pure agent-side audio feedback, unrelated to
+    // dialing the real destination, which should start as fast as possible
+    // (same reasoning as the log/originate parallelization just below).
+    agentChannel.ring().catch(() => {});
 
     // The destination should start dialing as fast as possible — measured
     // live, the agent lookup + call log write below took ~665ms combined
@@ -1057,13 +1068,15 @@ async function handleOutboundAgentCall(agentChannel, destination) {
     // possibly arrive (that alone takes several seconds), so there's no
     // realistic risk of it overwriting completeOutboundBridge's later
     // 'ongoing' write.
+    const calledLabel = internalTarget ? `agent #${internalTarget.targetAgentId}` : calledNumber;
+
     const logPromise = (async () => {
         const agentInfo = await getAgentBySipUsername(parseSipUsername(agentChannel.name));
         pending.agentId = agentInfo?.id ?? null;
-        console.log(`📤 Outbound call ${sessionId}: agent ${agentInfo?.name || 'unknown'} -> ${calledNumber}`);
+        console.log(`📤 Outbound call ${sessionId}: agent ${agentInfo?.name || 'unknown'} -> ${calledLabel}`);
         await upsertCallLog({
             session_id: sessionId,
-            caller: calledNumber,
+            caller: internalTarget ? `internal:${internalTarget.targetAgentId}` : calledNumber,
             direction: 'Outbound',
             status: 'dialing',
             agent_id: agentInfo?.id ?? null,
@@ -1073,14 +1086,14 @@ async function handleOutboundAgentCall(agentChannel, destination) {
 
     const originatePromise = client.channels
         .originate({
-            endpoint: `PJSIP/${destination}@at-trunk`,
+            endpoint: internalTarget ? `PJSIP/${internalTarget.sipUsername}` : `PJSIP/${destination}@at-trunk`,
             app: APP_NAME,
             appArgs: `outbound-dest:${sessionId}`,
             callerId: OUTBOUND_CALLER_ID,
             timeout: 30
         })
         .catch(async err => {
-            console.error(`❌ Failed to originate outbound call to ${destination}:`, err.message);
+            console.error(`❌ Failed to originate outbound call to ${calledLabel}:`, err.message);
             // Wait for the concurrent 'dialing' write to land first (best
             // effort — ignore if it itself failed) so this 'failed' write is
             // guaranteed to be the last one in, not overwritten by a
@@ -1089,7 +1102,43 @@ async function handleOutboundAgentCall(agentChannel, destination) {
             return finishOutboundCall(sessionId, 'failed');
         });
 
+    // Backstop for an unanswered call: originate()'s own `timeout: 30` above
+    // is supposed to be Asterisk's job, but that's a narrower, less
+    // battle-tested enforcement path than dialplan-timeout handling (there's
+    // no independent check here otherwise) — reported live as calls that
+    // just hang instead of ending. Cleared on a real bridge
+    // (completeOutboundBridge) or the destination's own StasisEnd
+    // (finishOutboundCall clears it unconditionally); finishOutboundCall is
+    // already idempotent via `pending.cleaned`, so a late/duplicate fire
+    // here is a harmless no-op, not a new failure mode.
+    pending.noAnswerTimer = setTimeout(() => {
+        finishOutboundCall(sessionId, 'failed').catch(err =>
+            console.error('❌ Error finishing unanswered outbound call:', err.message)
+        );
+    }, 33000);
+
     await Promise.all([logPromise, originatePromise]);
+}
+
+// Agent-to-agent calling: the dialplan's `_9X.` context (reserved — real
+// numbers all match `_+X.` instead, so there's no collision risk) hands us
+// `9<targetAgentId>` as the dialed extension. Resolved to a PJSIP endpoint
+// name up front so handleOutboundAgentCall never has to know the difference
+// between "dial this raw destination" and "dial this teammate" beyond the
+// one internalTarget object.
+async function handleInternalAgentCall(agentChannel, targetAgentIdRaw) {
+    const targetAgentId = parseInt(targetAgentIdRaw, 10);
+    const sipUsername = Number.isInteger(targetAgentId) ? await getAgentSipCredentials(targetAgentId) : null;
+
+    if (!sipUsername) {
+        console.error(
+            `❌ Internal call to agent ${targetAgentIdRaw}: no SIP credentials found (invalid id, or agent not provisioned for softphone)`
+        );
+        await agentChannel.hangup().catch(() => {});
+        return;
+    }
+
+    await handleOutboundAgentCall(agentChannel, null, { targetAgentId, sipUsername });
 }
 
 // The destination leg USUALLY enters Stasis while still ringing, well
@@ -1144,6 +1193,9 @@ async function completeOutboundBridge(sessionId) {
     // on_call at all since that line was never reached.
     if (!pending || pending.bridging || pending.bridged || !pending.destChannel) return;
     pending.bridging = true;
+    // A real answer — the no-answer backstop no longer applies to this call,
+    // and must not fire later mid-conversation and hang up an ongoing call.
+    clearTimeout(pending.noAnswerTimer);
 
     try {
         await pending.agentChannel.ringStop().catch(() => {});
@@ -1172,6 +1224,7 @@ async function finishOutboundCall(sessionId, status) {
     if (!pending || pending.cleaned) return;
     pending.cleaned = true;
     outboundBySessionId.delete(sessionId);
+    clearTimeout(pending.noAnswerTimer);
 
     if (pending.bridge) await pending.bridge.destroy().catch(() => {});
     await pending.agentChannel.hangup().catch(() => {});
@@ -1331,6 +1384,14 @@ async function main() {
             const destination = args[0].slice('outbound-agent:'.length);
             handleOutboundAgentCall(channel, destination).catch(err =>
                 console.error('❌ Error handling outbound call:', err.message)
+            );
+            return;
+        }
+
+        if (args[0] && args[0].startsWith('internal-agent:')) {
+            const targetAgentId = args[0].slice('internal-agent:'.length);
+            handleInternalAgentCall(channel, targetAgentId).catch(err =>
+                console.error('❌ Error handling internal agent call:', err.message)
             );
             return;
         }

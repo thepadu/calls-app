@@ -109,6 +109,25 @@ async function getAgentBySipUsername(sipUsername) {
     return data?.agents ?? null;
 }
 
+// Reverse of getAgentBySipUsername — needed for agent-to-agent internal
+// calling, where the dialed extension carries the target's agents.id (see
+// the `_9X.` dialplan context) and we need their PJSIP endpoint name to
+// originate to. Returns null (not an error) for an agent with no SIP
+// credentials provisioned yet — the caller treats that as "can't reach
+// this target" rather than throwing.
+async function getAgentSipCredentials(agentId) {
+    const { data, error } = await supabase
+        .from('agent_sip_credentials')
+        .select('sip_username')
+        .eq('agent_id', agentId)
+        .maybeSingle();
+    if (error) {
+        console.error('❌ Failed to load SIP credentials for agent:', error.message);
+        return null;
+    }
+    return data?.sip_username ?? null;
+}
+
 // "No agents online" forwarding — reuses the existing 'no_answer' condition
 // (the closest semantic fit of the four already in the schema; there's no
 // dedicated "nobody logged in" condition) rather than adding a new one.
@@ -324,6 +343,7 @@ module.exports = {
     setAgentStatus,
     getAgentPhone,
     getAgentBySipUsername,
+    getAgentSipCredentials,
     getNoAgentsForwardingDestination,
     getBusinessHours,
     claimAddPartyRequests,
