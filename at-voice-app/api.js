@@ -745,7 +745,10 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
     // a ticket's "assign to" dropdown without exposing the full roster
     // (phone numbers, emails) that GET /api/agents (below) is gated on.
     app.get('/api/agents/assignable', requireAuth, async (req, res) => {
-        const { data, error } = await supabase.from('agents').select('id, name').order('name');
+        // `status` is included alongside id/name so the Contacts page's
+        // "Team" directory can show live availability and disable calling a
+        // teammate who's busy/offline, without a second round trip.
+        const { data, error } = await supabase.from('agents').select('id, name, status').order('name');
 
         if (error) {
             console.error(error);
@@ -753,6 +756,72 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         }
 
         res.json({ agents: data });
+    });
+
+    // Personal quick-dial numbers — scoped to the logged-in agent's own
+    // rows only (owner_agent_id), never a shared/org-wide list. requireAuth
+    // (not requireSupervisor): every agent manages their own contacts.
+    app.get('/api/contacts', requireAuth, async (req, res) => {
+        if (!req.user.agentId) return res.json({ contacts: [] });
+
+        const { data, error } = await supabase
+            .from('contacts')
+            .select('id, name, phone, created_at')
+            .eq('owner_agent_id', req.user.agentId)
+            .order('name');
+
+        if (error) {
+            console.error(error);
+            return res.status(500).json({ error: 'Failed to load contacts' });
+        }
+
+        res.json({ contacts: data });
+    });
+
+    app.post('/api/contacts', requireAuth, async (req, res) => {
+        if (!req.user.agentId) return res.status(400).json({ error: 'No agent record linked to this account' });
+
+        const { name, phone } = req.body;
+        if (typeof name !== 'string' || !name.trim()) return res.status(400).json({ error: 'Name is required' });
+        if (typeof phone !== 'string' || !isValidE164(phone.trim())) {
+            return res.status(400).json({ error: 'Phone must be a valid number in +countrycode format' });
+        }
+
+        const { data, error } = await supabase
+            .from('contacts')
+            .insert({ owner_agent_id: req.user.agentId, name: name.trim(), phone: phone.trim() })
+            .select('id, name, phone, created_at')
+            .single();
+
+        if (error) {
+            console.error(error);
+            return res.status(500).json({ error: 'Failed to save contact' });
+        }
+
+        res.status(201).json({ contact: data });
+    });
+
+    app.delete('/api/contacts/:id', requireAuth, async (req, res) => {
+        const contactId = parseInt(req.params.id, 10);
+        if (!Number.isInteger(contactId)) return res.status(400).json({ error: 'Invalid contact id' });
+
+        // The owner_agent_id filter is what actually enforces ownership here
+        // — without it any authenticated agent could delete any other
+        // agent's contact by guessing/incrementing an id.
+        const { data, error } = await supabase
+            .from('contacts')
+            .delete()
+            .eq('id', contactId)
+            .eq('owner_agent_id', req.user.agentId)
+            .select('id');
+
+        if (error) {
+            console.error(error);
+            return res.status(500).json({ error: 'Failed to delete contact' });
+        }
+        if (!data.length) return res.status(404).json({ error: 'Contact not found' });
+
+        res.json({ ok: true });
     });
 
     // Drives the active-call status bar and the wrap-up prompt: the
