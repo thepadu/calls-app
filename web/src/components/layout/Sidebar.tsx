@@ -52,6 +52,9 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
                 <NavLink to="/tickets" className="sidebar-link">
                     Tags &amp; Tickets
                 </NavLink>
+                <NavLink to="/contacts" className="sidebar-link">
+                    Contacts
+                </NavLink>
                 {isSupervisor && (
                     <>
                         <NavLink to="/analytics" className="sidebar-link">

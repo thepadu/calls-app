@@ -24,10 +24,12 @@ type SoftphoneContextValue = {
     toggleMute: () => void;
     toggleHold: () => void;
     placeCall: (destinationE164: string) => Promise<void>;
+    placeInternalCall: (targetAgentId: number, displayName: string) => Promise<void>;
     audioOutputSupported: boolean;
     speakerOn: boolean;
     toggleSpeaker: () => Promise<void>;
     micPermissionDenied: boolean;
+    forceLocalReset: () => void;
 };
 
 const SoftphoneContext = createContext<SoftphoneContextValue>({
@@ -42,10 +44,12 @@ const SoftphoneContext = createContext<SoftphoneContextValue>({
     toggleMute: () => {},
     toggleHold: () => {},
     placeCall: async () => {},
+    placeInternalCall: async () => {},
     audioOutputSupported: false,
     speakerOn: false,
     toggleSpeaker: async () => {},
-    micPermissionDenied: false
+    micPermissionDenied: false,
+    forceLocalReset: () => {}
 });
 
 // setSinkId() is a real method on HTMLMediaElement in Chrome/Edge but isn't
@@ -407,7 +411,15 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
                             { urls: creds.turnUrl.replace('turn:', 'stun:') },
                             { urls: creds.turnUrl, username: creds.turnUsername, credential: creds.turnPassword }
                         ]
-                    }
+                    },
+                    // sip.js's own default (5000ms) held every outgoing INVITE
+                    // hostage until ICE gathering finished — measured as a major
+                    // contributor to a reported 7-11s delay before the destination
+                    // even started ringing. Host/srflx candidates gather in well
+                    // under a second; the TURN relay candidate isn't required for
+                    // a call to a public-IP media server, so cutting the cap short
+                    // just means the offer goes out without it rather than waiting.
+                    iceGatheringTimeout: 2000
                 },
                 delegate: {
                     onDisconnect: err => {
@@ -754,8 +766,14 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
         setOutgoingCall(null);
     }, [outgoingCall, warnIfCallActionFails]);
 
-    const placeCall = useCallback(
-        async (destinationE164: string) => {
+    // Shared by placeCall (a real phone number) and placeInternalCall (a
+    // reserved 9<agentId> extension dialing a teammate directly) — both send
+    // a plain SIP INVITE the exact same way; only the SIP user part and the
+    // label shown in the UI differ. `remoteNumber` is what CallScreen etc.
+    // display, so an internal call passes a real name here instead of the
+    // raw dialed extension.
+    const startOutgoingCall = useCallback(
+        async (sipUser: string, remoteNumber: string) => {
             const userAgent = userAgentRef.current;
             if (!userAgent || registrationState !== 'registered') {
                 showToast('Softphone is not registered yet', 'error');
@@ -768,21 +786,21 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
                 showToast('Finish or end the current call first', 'error');
                 return;
             }
-            const target = UserAgent.makeURI(`sip:${destinationE164}@${domainRef.current}`);
+            const target = UserAgent.makeURI(`sip:${sipUser}@${domainRef.current}`);
             if (!target) {
                 // Every other failure path here shows a toast — this one
                 // returned bare, so a malformed destination made the dialer
                 // silently do nothing: no error, no call, no clue why. The
                 // caller (FloatingDialer) treats a non-throwing placeCall()
                 // as success and closes the popover as if the call went out.
-                console.error('[softphone] UserAgent.makeURI returned null for', destinationE164, domainRef.current);
+                console.error('[softphone] UserAgent.makeURI returned null for', sipUser, domainRef.current);
                 showToast('Could not place call — invalid number', 'error');
                 return;
             }
 
             const inviter = new Inviter(userAgent, target);
-            setOutgoingCall({ session: inviter, remoteNumber: destinationE164 });
-            wireSessionStateChange(inviter, destinationE164);
+            setOutgoingCall({ session: inviter, remoteNumber });
+            wireSessionStateChange(inviter, remoteNumber);
             inviter.stateChange.addListener(state => {
                 if (state === SessionState.Established || state === SessionState.Terminated) {
                     setOutgoingCall(current => (current?.session === inviter ? null : current));
@@ -802,6 +820,45 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
         [registrationState, activeCall, outgoingCall, incomingCall, showToast, wireSessionStateChange]
     );
 
+    const placeCall = useCallback(
+        (destinationE164: string) => startOutgoingCall(destinationE164, destinationE164),
+        [startOutgoingCall]
+    );
+
+    // `9<agentId>` matches the dialplan's reserved internal-call extension
+    // (`_9.` in extensions.conf, distinct from real numbers which always
+    // start with `+`) — ari-app resolves it to the target's own PJSIP
+    // endpoint and dials that directly, no external trunk involved.
+    const placeInternalCall = useCallback(
+        (targetAgentId: number, displayName: string) => startOutgoingCall(`9${targetAgentId}`, displayName),
+        [startOutgoingCall]
+    );
+
+    // Escape hatch for ActiveCallProvider's server-truth reconciliation: a
+    // local session can be stuck reporting itself as live (Established, or
+    // still ringing) when the real call is actually long gone — e.g. the
+    // agent's browser was backgrounded/interrupted at the exact moment the
+    // far end hung up, so the local UA never received a BYE and
+    // SessionState never reaches Terminated on its own. Best-effort network
+    // teardown first (in case it's somehow still reachable), then the same
+    // local cleanup handleSessionTerminated already does for a normal call end.
+    const forceLocalReset = useCallback(() => {
+        if (activeCall) {
+            activeCall.session.bye().catch(() => {});
+        } else if (outgoingCall) {
+            const { session } = outgoingCall;
+            if (session.state === SessionState.Established) session.bye().catch(() => {});
+            else session.cancel().catch(() => {});
+        } else if (incomingCall) {
+            const { session } = incomingCall;
+            if (session.state === SessionState.Established) session.bye().catch(() => {});
+            else session.reject().catch(() => {});
+        }
+        handleSessionTerminated();
+        setOutgoingCall(null);
+        setIncomingCall(null);
+    }, [activeCall, outgoingCall, incomingCall, handleSessionTerminated]);
+
     return (
         <SoftphoneContext.Provider
             value={{
@@ -816,10 +873,12 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
                 toggleMute,
                 toggleHold,
                 placeCall,
+                placeInternalCall,
                 audioOutputSupported,
                 speakerOn,
                 toggleSpeaker,
-                micPermissionDenied
+                micPermissionDenied,
+                forceLocalReset
             }}
         >
             {children}

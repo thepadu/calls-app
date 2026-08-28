@@ -1,6 +1,8 @@
 import { createContext, useContext, useEffect, useRef, useState, ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { apiFetch } from './api';
+import { useSoftphone } from './softphone';
+import { useToast } from './toast';
 
 type Call = {
     session_id: string;
@@ -35,7 +37,7 @@ const ActiveCallContext = createContext<{
 // from the server without real-time infra (see SYSTEM_DESIGN.md's
 // scalability notes), so this is a plain 5s poll like everything else.
 export function ActiveCallProvider({ children }: { children: ReactNode }) {
-    const { data } = useQuery({
+    const { data, dataUpdatedAt } = useQuery({
         queryKey: ['active-call'],
         queryFn: () => apiFetch('/api/agents/me/active-call'),
         refetchInterval: 5000
@@ -58,6 +60,42 @@ export function ActiveCallProvider({ children }: { children: ReactNode }) {
         if (wasOnCall.current && !isOnCall) setJustEnded(true);
         wasOnCall.current = isOnCall;
     }, [isOnCall]);
+
+    // Server-truth reconciliation: the softphone's own local session state
+    // can get stuck reporting a call as live (e.g. still "on hold") after a
+    // disruptive event — a backgrounded/killed mobile tab that never
+    // received the real BYE — with nothing in that hook itself able to
+    // detect it's stale. This poll is the one thing that reliably knows the
+    // real state, so a sustained disagreement forces the local side to
+    // defer to it rather than adding another special case to softphone.tsx.
+    // Requires 2 consecutive polls (~10s) of disagreement, not 1, so this
+    // can't misfire in the brief legitimate window right after a real call
+    // first connects, before ari-app's own status flip has propagated here.
+    const softphone = useSoftphone();
+    const showToast = useToast();
+    const mismatchStreakRef = useRef(0);
+
+    useEffect(() => {
+        if (!dataUpdatedAt) return;
+        const localCallLive = !!(softphone.activeCall || softphone.incomingCall || softphone.outgoingCall);
+        const serverSaysNoCall = agentStatus !== null && agentStatus !== 'on_call';
+
+        if (localCallLive && serverSaysNoCall) {
+            mismatchStreakRef.current += 1;
+            if (mismatchStreakRef.current >= 2) {
+                mismatchStreakRef.current = 0;
+                softphone.forceLocalReset();
+                showToast('Cleared a stuck call — the server no longer shows it as active', 'error');
+            }
+        } else {
+            mismatchStreakRef.current = 0;
+        }
+        // softphone/showToast are stable-enough function identities from
+        // their own providers, but not included here deliberately — this
+        // effect must fire on every poll tick (dataUpdatedAt), not
+        // whenever a fresh function reference happens to be created.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [dataUpdatedAt, agentStatus]);
 
     return (
         <ActiveCallContext.Provider
