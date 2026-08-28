@@ -995,7 +995,16 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
             username: creds.sip_username,
             password: creds.sip_password,
             domain: process.env.SOFTPHONE_SIP_DOMAIN || 'sip.chumz.online',
-            wssUrl: process.env.SOFTPHONE_WSS_URL || 'wss://sip.chumz.online:8089/ws',
+            // Proxied through Caddy on the standard HTTPS port (443, implicit
+            // — no :port needed) instead of connecting straight to Asterisk's
+            // own TLS listener on the nonstandard 8089. That direct exposure
+            // was getting hit by routine internet background-radiation SIP/
+            // TLS scanning (visible in this box's own fail2ban history) and
+            // is the likely cause of an automated upstream block that took
+            // softphone calling down account-wide for several hours. 443
+            // blends in with all other HTTPS traffic instead of standing out
+            // as a bespoke VoIP port.
+            wssUrl: process.env.SOFTPHONE_WSS_URL || 'wss://sip.chumz.online/ws',
             // TURN relay for agents on networks where a direct/STUN-only ICE
             // path fails (symmetric NAT, restrictive mobile/corporate
             // firewalls) — without this the browser had no NAT-traversal
