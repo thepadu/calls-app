@@ -71,6 +71,14 @@ export function ActiveCallProvider({ children }: { children: ReactNode }) {
     // Requires 2 consecutive polls (~10s) of disagreement, not 1, so this
     // can't misfire in the brief legitimate window right after a real call
     // first connects, before ari-app's own status flip has propagated here.
+    //
+    // Checks `activeCall` (this row now includes 'dialing', not just
+    // 'ongoing' — see GET /api/agents/me/active-call) rather than
+    // `agentStatus === 'on_call'` — an agent-placed outbound call is
+    // answered on the agent's own leg immediately, well before the real
+    // destination picks up and the call actually bridges to 'ongoing'/
+    // flips agentStatus. Keying off agentStatus alone made this force-end
+    // real calls that were still legitimately ringing out.
     const softphone = useSoftphone();
     const showToast = useToast();
     const mismatchStreakRef = useRef(0);
@@ -78,7 +86,7 @@ export function ActiveCallProvider({ children }: { children: ReactNode }) {
     useEffect(() => {
         if (!dataUpdatedAt) return;
         const localCallLive = !!(softphone.activeCall || softphone.incomingCall || softphone.outgoingCall);
-        const serverSaysNoCall = agentStatus !== null && agentStatus !== 'on_call';
+        const serverSaysNoCall = !activeCall;
 
         if (localCallLive && serverSaysNoCall) {
             mismatchStreakRef.current += 1;
@@ -95,7 +103,7 @@ export function ActiveCallProvider({ children }: { children: ReactNode }) {
         // effect must fire on every poll tick (dataUpdatedAt), not
         // whenever a fresh function reference happens to be created.
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [dataUpdatedAt, agentStatus]);
+    }, [dataUpdatedAt, activeCall]);
 
     return (
         <ActiveCallContext.Provider

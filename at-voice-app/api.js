@@ -846,13 +846,21 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         // matter how the phone-format mismatch below is handled. Falls back
         // to the old phone-based match only for rows written before that
         // migration.
+        // Includes 'dialing', not just 'ongoing' — an agent-placed outbound
+        // call is answered on the agent's own leg (and so looks fully
+        // "active" client-side) well before the real destination picks up
+        // and the call actually bridges to 'ongoing'. Excluding 'dialing'
+        // here made the frontend's ghost-call reconciliation (see
+        // web/src/lib/activeCall.tsx) unable to tell "still legitimately
+        // ringing out" from "server has no record of this call at all",
+        // and it force-ended real calls that just hadn't been answered yet.
         let call = null;
         if (req.user.agentId) {
             const { data } = await supabase
                 .from('call_logs')
                 .select('*')
                 .eq('agent_id', req.user.agentId)
-                .eq('status', 'ongoing')
+                .in('status', ['ongoing', 'dialing'])
                 .order('created_at', { ascending: false })
                 .limit(1)
                 .maybeSingle();
@@ -867,7 +875,7 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
                 .from('call_logs')
                 .select('*')
                 .in('agent_number', [agent.phone, normalizePhone(agent.phone)])
-                .eq('status', 'ongoing')
+                .in('status', ['ongoing', 'dialing'])
                 .order('created_at', { ascending: false })
                 .limit(1)
                 .maybeSingle();
