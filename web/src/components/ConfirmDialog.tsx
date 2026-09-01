@@ -7,6 +7,10 @@ type ConfirmDialogProps = {
     message: string;
     confirmLabel?: string;
     danger?: boolean;
+    // Disables the confirm button — pass a mutation's `isPending` so a
+    // double-click can't fire the action twice (e.g. a second DELETE
+    // hitting an already-removed row and surfacing a false failure toast).
+    confirmDisabled?: boolean;
     onConfirm: () => void;
     onCancel: () => void;
 };
@@ -17,6 +21,7 @@ export default function ConfirmDialog({
     message,
     confirmLabel = 'Confirm',
     danger = false,
+    confirmDisabled = false,
     onConfirm,
     onCancel
 }: ConfirmDialogProps) {
@@ -41,7 +46,7 @@ export default function ConfirmDialog({
                 <p>{message}</p>
                 <div className="modal-actions">
                     <button className="btn btn-secondary" onClick={onCancel}>Cancel</button>
-                    <button className={danger ? 'btn btn-danger' : 'btn btn-primary'} onClick={onConfirm}>
+                    <button className={danger ? 'btn btn-danger' : 'btn btn-primary'} onClick={onConfirm} disabled={confirmDisabled}>
                         {confirmLabel}
                     </button>
                 </div>

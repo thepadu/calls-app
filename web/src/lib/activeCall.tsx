@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useRef, useState, ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import type { Session } from 'sip.js';
 import { apiFetch } from './api';
 import { useSoftphone } from './softphone';
 import { useToast } from './toast';
@@ -72,21 +73,37 @@ export function ActiveCallProvider({ children }: { children: ReactNode }) {
     // can't misfire in the brief legitimate window right after a real call
     // first connects, before ari-app's own status flip has propagated here.
     //
-    // Checks `activeCall` (this row now includes 'dialing', not just
-    // 'ongoing' — see GET /api/agents/me/active-call) rather than
-    // `agentStatus === 'on_call'` — an agent-placed outbound call is
-    // answered on the agent's own leg immediately, well before the real
-    // destination picks up and the call actually bridges to 'ongoing'/
-    // flips agentStatus. Keying off agentStatus alone made this force-end
-    // real calls that were still legitimately ringing out.
+    // "Legitimate" is an OR of two signals, either is enough:
+    //  - `activeCall` (this row now includes 'dialing', not just 'ongoing'
+    //    — see GET /api/agents/me/active-call) covers the *caller* side of
+    //    a call still ringing out: their own leg answers immediately, well
+    //    before the real destination picks up and agentStatus flips.
+    //  - `agentStatus === 'on_call'` covers the *callee* side of an
+    //    internal agent-to-agent call: no call_logs row is ever attributed
+    //    to them, but ari-app does flip their own agentStatus once bridged.
+    // A genuinely stuck/ghost call has neither — the real call's own
+    // server-side cleanup reverts agentStatus independently of whatever
+    // the client's browser is doing, so this doesn't weaken the original
+    // ghost-detection.
     const softphone = useSoftphone();
     const showToast = useToast();
     const mismatchStreakRef = useRef(0);
+    // The streak above must belong to one specific call — otherwise a
+    // leftover mismatch tick from a call that just ended can combine with
+    // a freshly-redialed call's own brief startup window and trip the
+    // threshold against a call with no real stuck time of its own.
+    const trackedSessionRef = useRef<Session | null>(null);
 
     useEffect(() => {
         if (!dataUpdatedAt) return;
-        const localCallLive = !!(softphone.activeCall || softphone.incomingCall || softphone.outgoingCall);
-        const serverSaysNoCall = !activeCall;
+        const liveSession = softphone.activeCall?.session ?? softphone.outgoingCall?.session ?? softphone.incomingCall?.session ?? null;
+        const localCallLive = !!liveSession;
+        const serverSaysNoCall = !activeCall && agentStatus !== 'on_call';
+
+        if (liveSession !== trackedSessionRef.current) {
+            trackedSessionRef.current = liveSession;
+            mismatchStreakRef.current = 0;
+        }
 
         if (localCallLive && serverSaysNoCall) {
             mismatchStreakRef.current += 1;
@@ -103,7 +120,7 @@ export function ActiveCallProvider({ children }: { children: ReactNode }) {
         // effect must fire on every poll tick (dataUpdatedAt), not
         // whenever a fresh function reference happens to be created.
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [dataUpdatedAt, activeCall]);
+    }, [dataUpdatedAt, activeCall, agentStatus]);
 
     return (
         <ActiveCallContext.Provider

@@ -292,14 +292,37 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
         setSpeakerOn(false);
     }, []);
 
+    // Mirrors `activeCall` for reading its latest value from inside a
+    // sip.js event listener — those are registered once per session
+    // (below) and invoked outside React's render cycle, so a value closed
+    // over at registration time would go stale. Kept in sync via the
+    // effect right after.
+    const activeCallRef = useRef(activeCall);
+    useEffect(() => {
+        activeCallRef.current = activeCall;
+    }, [activeCall]);
+
+    // A session's own Terminated listener must only clear state if it's
+    // still the one actually tracked — without this guard, forceLocalReset
+    // (below) can race it: it fires bye()/cancel()/reject() without
+    // awaiting, then clears state immediately, which reopens the
+    // busy-guard in startOutgoingCall and lets a real new call start right
+    // away. When the old session's own async teardown eventually completes
+    // (its Terminated listener is still armed), it would otherwise null
+    // out that new, live call instead of the stale one it actually belongs to.
+    const clearActiveCallIfCurrent = useCallback((session: Session) => {
+        if (activeCallRef.current?.session !== session) return;
+        handleSessionTerminated();
+    }, [handleSessionTerminated]);
+
     const wireSessionStateChange = useCallback(
         (session: Session, remoteNumber: string) => {
             session.stateChange.addListener(state => {
                 if (state === SessionState.Established) handleSessionEstablished(session, remoteNumber);
-                else if (state === SessionState.Terminated) handleSessionTerminated();
+                else if (state === SessionState.Terminated) clearActiveCallIfCurrent(session);
             });
         },
-        [handleSessionEstablished, handleSessionTerminated]
+        [handleSessionEstablished, clearActiveCallIfCurrent]
     );
 
     useEffect(() => {

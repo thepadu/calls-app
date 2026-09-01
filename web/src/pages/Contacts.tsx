@@ -228,6 +228,7 @@ export default function Contacts() {
                 message={`Remove ${pendingDelete?.name} from your contacts?`}
                 confirmLabel="Remove"
                 danger
+                confirmDisabled={deleteContact.isPending}
                 onConfirm={() => pendingDelete && deleteContact.mutate(pendingDelete.id)}
                 onCancel={() => setPendingDelete(null)}
             />
