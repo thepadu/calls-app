@@ -1030,6 +1030,14 @@ async function handleOutboundAgentCall(agentChannel, destination, internalTarget
     const pending = {
         agentChannel,
         agentId: null,
+        // The callee of an internal agent-to-agent call — tracked
+        // separately from agentId (always the caller) so both sides of the
+        // call get flipped to on_call/available together. Without this,
+        // the callee's own status never changes: dequeueNext could route
+        // an unrelated customer call to them mid-conversation, and the
+        // frontend's ghost-call reconciliation (no call_logs row is ever
+        // attributed to them either) would force-end their real call.
+        internalTargetAgentId: internalTarget?.targetAgentId ?? null,
         destChannel: null,
         bridge: null,
         bridged: false,
@@ -1127,18 +1135,44 @@ async function handleOutboundAgentCall(agentChannel, destination, internalTarget
 // between "dial this raw destination" and "dial this teammate" beyond the
 // one internalTarget object.
 async function handleInternalAgentCall(agentChannel, targetAgentIdRaw) {
+    const sessionId = agentChannel.id;
     const targetAgentId = parseInt(targetAgentIdRaw, 10);
-    const sipUsername = Number.isInteger(targetAgentId) ? await getAgentSipCredentials(targetAgentId) : null;
+    const target = Number.isInteger(targetAgentId) ? await getAgentSipCredentials(targetAgentId) : null;
 
-    if (!sipUsername) {
-        console.error(
-            `❌ Internal call to agent ${targetAgentIdRaw}: no SIP credentials found (invalid id, or agent not provisioned for softphone)`
-        );
+    // Every rejection path below writes a 'failed' call_logs row before
+    // hanging up — previously this function just hung up silently, leaving
+    // a mistyped/unavailable-target internal call invisible in call
+    // history (the global StasisEnd/markMissedIfAbandoned fallback is a
+    // no-op too, since it has no row to match against).
+    const reject = async reason => {
+        console.error(`❌ Internal call to agent ${targetAgentIdRaw} rejected: ${reason}`);
+        await upsertCallLog({
+            session_id: sessionId,
+            caller: `internal:${targetAgentIdRaw}`,
+            direction: 'Outbound',
+            status: 'failed'
+        }).catch(() => {});
         await agentChannel.hangup().catch(() => {});
+    };
+
+    if (!target) {
+        await reject('invalid id, or target agent not provisioned for softphone');
         return;
     }
 
-    await handleOutboundAgentCall(agentChannel, null, { targetAgentId, sipUsername });
+    // No extra DB round-trip — the caller's own SIP username is already
+    // derivable from the channel name, same helper used for logging below.
+    if (target.sipUsername === parseSipUsername(agentChannel.name)) {
+        await reject('cannot call yourself');
+        return;
+    }
+
+    if (target.status !== 'available') {
+        await reject(`target agent is currently '${target.status}', not available`);
+        return;
+    }
+
+    await handleOutboundAgentCall(agentChannel, null, { targetAgentId, sipUsername: target.sipUsername });
 }
 
 // The destination leg USUALLY enters Stasis while still ringing, well
@@ -1211,6 +1245,10 @@ async function completeOutboundBridge(sessionId) {
         // as 'available' for the entire duration of an outbound call — a
         // new customer could be routed straight to someone already busy.
         if (pending.agentId) await setAgentStatus(pending.agentId, 'on_call');
+        // Same reasoning for the other side of an internal agent-to-agent
+        // call — the callee's own status is otherwise never touched by
+        // this flow at all (see the comment on pending.internalTargetAgentId).
+        if (pending.internalTargetAgentId) await setAgentStatus(pending.internalTargetAgentId, 'on_call');
 
         console.log(`🔗 Outbound call bridged: ${sessionId}`);
     } catch (err) {
@@ -1236,6 +1274,7 @@ async function finishOutboundCall(sessionId, status) {
     // stomp on an unrelated concurrent state change (e.g. mid-ring for a
     // different, incoming call).
     if (pending.agentId && pending.bridged) await setAgentStatus(pending.agentId, 'available');
+    if (pending.internalTargetAgentId && pending.bridged) await setAgentStatus(pending.internalTargetAgentId, 'available');
 
     const duration = pending.answeredAt ? Math.round((Date.now() - pending.answeredAt) / 1000) : 0;
     await upsertCallLog({ session_id: sessionId, status, duration });
