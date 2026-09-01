@@ -1,0 +1,19 @@
+# /etc/systemd/system/chumz-ari-app.service
+[Unit]
+Description=Chumz ARI call-control app (IVR, queue, agent routing)
+After=network.target asterisk.service
+Requires=asterisk.service
+
+[Service]
+Type=simple
+User=asterisk
+Group=asterisk
+WorkingDirectory=/opt/chumz-ari-app
+ExecStart=/usr/bin/node /opt/chumz-ari-app/index.js
+Restart=always
+RestartSec=3
+StandardOutput=append:/var/log/chumz-ari-app.log
+StandardError=append:/var/log/chumz-ari-app.log
+
+[Install]
+WantedBy=multi-user.target

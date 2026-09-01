@@ -1,0 +1,11 @@
+# /etc/systemd/system/chumz-safe-restart.timer
+[Unit]
+Description=Run chumz-safe-restart every 30 minutes
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=30min
+RandomizedDelaySec=90
+
+[Install]
+WantedBy=timers.target

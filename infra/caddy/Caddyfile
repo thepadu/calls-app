@@ -1,0 +1,38 @@
+sip.chumz.online {
+	# Reverse proxy to ari-app's internal HTTP server (127.0.0.1:3001) —
+	# the only two routes it exposes. Everything else 404s here rather
+	# than falling through to a static file server, since this domain has
+	# no site content of its own. Softphone WebSocket traffic (/ws, below)
+	# is also proxied from here now to Asterisk's
+	# loopback-only TLS listener (8089) — see the /ws block below for why
+	# that one specifically, not the plain 8088 ARI listener.
+	handle /healthz {
+		reverse_proxy 127.0.0.1:3001
+	}
+	handle /internal/* {
+		reverse_proxy 127.0.0.1:3001
+	}
+
+	# Browser softphones connect here (wss://sip.chumz.online/ws, standard
+	# 443 -- no separate port). Proxies to Asterisk’s loopback-only TLS
+	# listener (127.0.0.1:8089) -- deliberately separate from the plain
+	# 8088 listener, which is reserved exclusively for ari-app’s own ARI
+	# REST/WebSocket connection. The two briefly shared 8088, which caused
+	# intermittent outbound-call hangs -- ARI’s originate() REST call would
+	# sometimes never complete while contending with concurrent softphone
+	# WS connections on the same port. Asterisk terminates TLS on 8089 with
+	# its real sip.chumz.online cert, but Caddy connects to it as
+	# 127.0.0.1, so the certificate name will not match -- safe to skip
+	# verification since this connection never leaves loopback. Caddy
+	# handles the WebSocket upgrade automatically, no special config needed.
+	handle /ws {
+		reverse_proxy https://127.0.0.1:8089 {
+			transport http {
+				tls_insecure_skip_verify
+			}
+		}
+	}
+	handle {
+		respond 404
+	}
+}

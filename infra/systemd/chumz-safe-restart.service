@@ -1,0 +1,8 @@
+# /etc/systemd/system/chumz-safe-restart.service
+[Unit]
+Description=Chumz: restart asterisk/chumz-ari-app/coturn if needrestart-flagged and no active calls
+ConditionPathExists=/usr/local/sbin/chumz-safe-restart.sh
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/chumz-safe-restart.sh
