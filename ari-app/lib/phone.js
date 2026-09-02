@@ -1,4 +1,4 @@
-// Copied from at-voice-app/lib/phone.js — duplicated rather than shared
+// Copied from calls-app/lib/phone.js — duplicated rather than shared
 // since this app deploys to a different server (the Asterisk VPS) than the
 // main Express app (DigitalOcean App Platform), so a relative import isn't
 // possible. Keep these two copies in sync if the normalization rules ever

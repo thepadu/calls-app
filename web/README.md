@@ -1,6 +1,6 @@
 # Chumz Support — Web App
 
-The React admin console, talking to the JSON API in `../at-voice-app/api.js`. See `../SYSTEM_DESIGN.md` for the full architecture and reasoning.
+The React admin console, talking to the JSON API in `../calls-app/api.js`. See `../SYSTEM_DESIGN.md` for the full architecture and reasoning.
 
 ## Setup
 
@@ -16,7 +16,7 @@ This has been run and verified in the environment this was built in — `npm ins
 Run the backend and frontend as two processes:
 
 ```bash
-# Terminal 1 — from at-voice-app/
+# Terminal 1 — from calls-app/
 npm start
 
 # Terminal 2 — from web/
@@ -41,7 +41,7 @@ npm test         # Vitest — 13/13 passing
 npm run build
 ```
 
-Outputs to `web/dist`, which `at-voice-app/app.js` serves at `/app` (e.g. `https://calls.chumz.online/app`). The platform's build command needs to install and build **both** `at-voice-app/` and `web/` — check how it's currently configured; a single-project setup will likely only build the backend.
+Outputs to `web/dist`, which `calls-app/app.js` serves at `/app` (e.g. `https://calls.chumz.online/app`). The platform's build command needs to install and build **both** `calls-app/` and `web/` — check how it's currently configured; a single-project setup will likely only build the backend.
 
 ## What's here
 

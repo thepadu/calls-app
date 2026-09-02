@@ -1282,7 +1282,7 @@ async function finishOutboundCall(sessionId, status) {
     console.log(`📴 Outbound call ended: ${sessionId} (${status})`);
 }
 
-// Blind-add-a-party MVP: at-voice-app has no direct line into a live call —
+// Blind-add-a-party MVP: calls-app has no direct line into a live call —
 // this process is the only thing that can touch a real bridge — so a
 // supervisor/agent request lands as two columns on the call's own
 // call_logs row (set by POST /api/calls/active/add-party) and this poll

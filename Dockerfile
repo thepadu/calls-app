@@ -1,6 +1,6 @@
 # Monorepo build: web/ (Vite/React) is compiled to static assets, then
-# copied into the at-voice-app/ Express server's expected ../web/dist
-# path (see at-voice-app/app.js's express.static mount), so the runtime
+# copied into the calls-app/ Express server's expected ../web/dist
+# path (see calls-app/app.js's express.static mount), so the runtime
 # image only needs the API's own production dependencies.
 
 FROM node:22-alpine AS web-build
@@ -11,10 +11,10 @@ COPY web/ ./
 RUN npm run build
 
 FROM node:22-alpine
-WORKDIR /repo/at-voice-app
-COPY at-voice-app/package*.json ./
+WORKDIR /repo/calls-app
+COPY calls-app/package*.json ./
 RUN npm ci --omit=dev
-COPY at-voice-app/ ./
+COPY calls-app/ ./
 COPY --from=web-build /repo/web/dist /repo/web/dist
 
 ENV NODE_ENV=production

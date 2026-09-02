@@ -47,13 +47,13 @@ This describes the system as it exists today, not a history of how it got here. 
 
 Two separate Node processes, two separate hosts:
 - **`ari-app/`** runs on the same Ubuntu 24.04 VPS as Asterisk itself (`sip.chumz.online`), started via systemd (`chumz-ari-app.service`, `Restart=always`). This is where all real-time call control lives — it talks to Asterisk over ARI (a WebSocket for events, REST for commands), and to Supabase for everything the dashboard needs to see.
-- **`at-voice-app/`** (Express) runs on DigitalOcean App Platform, at `calls.chumz.online` (migrated from Render). It serves the React dashboard, the JSON API the dashboard calls, and Google OAuth. It does **not** handle any live call audio or signaling — that's entirely the ARI app's job.
+- **`calls-app/`** (Express) runs on DigitalOcean App Platform, at `calls.chumz.online` (migrated from Render). It serves the React dashboard, the JSON API the dashboard calls, and Google OAuth. It does **not** handle any live call audio or signaling — that's entirely the ARI app's job.
 
 Both processes talk to the **same Supabase project** with the `service_role` key (bypasses RLS at the Postgres role level — RLS policy content is a non-issue for either process).
 
 Text-to-speech for the IVR (greeting, menu, messages) is self-hosted **Piper** (neural TTS), since Asterisk has no built-in TTS engine. Synthesized audio is cached as raw µ-law files keyed by a hash of the text, so a prompt is only actually re-synthesized when a supervisor edits it.
 
-Schema changes live in `at-voice-app/migrations/*.sql` (currently 001–010), numbered and applied in order via the Supabase SQL editor — there's no migration-runner tooling, so every migration must be idempotent (safe to re-run), and applying them in order matters.
+Schema changes live in `calls-app/migrations/*.sql` (currently 001–010), numbered and applied in order via the Supabase SQL editor — there's no migration-runner tooling, so every migration must be idempotent (safe to re-run), and applying them in order matters.
 
 ## Auth & roles
 

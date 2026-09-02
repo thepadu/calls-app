@@ -1,5 +1,5 @@
 {
-  "name": "at-voice-app",
+  "name": "calls-app",
   "version": "1.0.0",
   "description": "Chumz support dashboard — Express API, Google auth, and the React SPA it serves",
   "main": "app.js",
