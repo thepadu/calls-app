@@ -9,6 +9,7 @@ This directory is a **mirror** of the system-level config that runs the Asterisk
 | `caddy/Caddyfile` | `/etc/caddy/Caddyfile` |
 | `asterisk/http.conf` | `/etc/asterisk/http.conf` |
 | `asterisk/extensions.conf` | `/etc/asterisk/extensions.conf` |
+| `asterisk/musiconhold.conf` | `/etc/asterisk/musiconhold.conf` |
 | `systemd/chumz-safe-restart.sh` | `/usr/local/sbin/chumz-safe-restart.sh` |
 | `systemd/chumz-safe-restart.service` | `/etc/systemd/system/chumz-safe-restart.service` |
 | `systemd/chumz-safe-restart.timer` | `/etc/systemd/system/chumz-safe-restart.timer` |

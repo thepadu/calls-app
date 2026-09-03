@@ -209,6 +209,86 @@ function CallRatingPanel() {
     );
 }
 
+type HoldMusicConfig = {
+    active_class: 'default' | 'custom';
+    custom_filename?: string | null;
+    uploaded_at?: string | null;
+    uploaded_by?: string | null;
+};
+
+function HoldMusicPanel() {
+    const queryClient = useQueryClient();
+    const showToast = useToast();
+    const [file, setFile] = useState<File | null>(null);
+
+    const { data } = useQuery({ queryKey: ['hold-music'], queryFn: () => apiFetch('/api/hold-music') });
+    const config: HoldMusicConfig = data?.config ?? { active_class: 'default' };
+
+    const upload = useMutation({
+        mutationFn: () => {
+            const formData = new FormData();
+            formData.append('file', file as File);
+            return apiFetch('/api/hold-music', { method: 'POST', body: formData });
+        },
+        onSuccess: () => {
+            showToast('Hold music updated');
+            setFile(null);
+            queryClient.invalidateQueries({ queryKey: ['hold-music'] });
+        },
+        onError: (err: unknown) => showToast(errorMessage(err), 'error')
+    });
+
+    const reset = useMutation({
+        mutationFn: () => apiFetch('/api/hold-music/reset', { method: 'POST' }),
+        onSuccess: () => {
+            showToast('Hold music reset to default');
+            queryClient.invalidateQueries({ queryKey: ['hold-music'] });
+        },
+        onError: (err: unknown) => showToast(errorMessage(err), 'error')
+    });
+
+    return (
+        <div className="panel">
+            <div className="panel-header">
+                <h3>Hold music</h3>
+            </div>
+            <p className="hint">
+                Played to callers waiting in the queue. Upload an MP3 (up to 8MB) to replace it, or reset
+                back to the default at any time — takes effect immediately, including for callers already
+                on hold.
+            </p>
+
+            <p className="hint" style={{ margin: '0 0 12px' }}>
+                Currently playing:{' '}
+                {config.active_class === 'custom' ? (
+                    <>
+                        <strong>{config.custom_filename}</strong>
+                        {config.uploaded_at && ` — uploaded ${new Date(config.uploaded_at).toLocaleString()}`}
+                        {config.uploaded_by && ` by ${config.uploaded_by}`}
+                    </>
+                ) : (
+                    'default Asterisk hold music'
+                )}
+            </p>
+
+            <div className="forwarding-add-row" style={{ gridTemplateColumns: 'auto 1fr' }}>
+                <input type="file" accept="audio/mpeg,audio/mp3,.mp3" onChange={e => setFile(e.target.files?.[0] ?? null)} />
+                <button className="btn btn-primary" disabled={!file || upload.isPending} onClick={() => upload.mutate()}>
+                    Upload
+                </button>
+            </div>
+
+            {config.active_class === 'custom' && (
+                <div className="modal-actions" style={{ justifyContent: 'flex-start', marginTop: 12 }}>
+                    <button className="btn btn-link" disabled={reset.isPending} onClick={() => reset.mutate()}>
+                        Reset to default
+                    </button>
+                </div>
+            )}
+        </div>
+    );
+}
+
 export default function CallForwarding() {
     const queryClient = useQueryClient();
     const showToast = useToast();
@@ -337,6 +417,7 @@ export default function CallForwarding() {
             />
 
             <CallRatingPanel />
+            <HoldMusicPanel />
         </div>
     );
 }

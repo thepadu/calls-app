@@ -1,6 +1,21 @@
 const crypto = require('crypto');
+const multer = require('multer');
 const { isValidE164, normalizePhone } = require('./lib/phone');
 const { invalidateAgentCache } = require('./lib/agentCache');
+
+// Memory storage, not disk — the file only ever needs to exist long enough
+// to be forwarded to ari-app as a base64 body (see setHoldMusicOnAsterisk);
+// there's nowhere on this box (DigitalOcean App Platform) it would need to
+// persist. fileFilter is a first pass, not the real boundary — ari-app's own
+// writeCustomTrack (holdMusic.js) enforces the same size cap independently,
+// since this internal HTTP channel is authenticated, not sandboxed, and
+// shouldn't rely on this process having stayed well-behaved.
+const MAX_HOLD_MUSIC_BYTES = 8 * 1024 * 1024;
+const uploadHoldMusic = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: MAX_HOLD_MUSIC_BYTES },
+    fileFilter: (req, file, cb) => cb(null, ['audio/mpeg', 'audio/mp3'].includes(file.mimetype))
+});
 
 // A cross-VPS call to ari-app's internal provisioning endpoint (see Track B
 // of the SIP-provisioning plan) — mirrors the SUPABASE_TIMEOUT_MS pattern
@@ -109,6 +124,78 @@ async function deprovisionAgentOnAsterisk(agentId) {
     } catch (err) {
         console.error('❌ Failed to reach ari-app to revoke SIP access:', err.message);
         return { ok: false };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+// Same shape as hangupCallOnAsterisk above. `audioBuffer` is null for a
+// reset-to-default (ari-app needs no file in that case, just the class
+// switch); `INTERNAL_SYNC_TIMEOUT_MS`'s 10s default is too tight for
+// uploading several MB of audio over a WAN hop, so this gets its own.
+const HOLD_MUSIC_SYNC_TIMEOUT_MS = 30000;
+
+async function setHoldMusicOnAsterisk(audioBuffer) {
+    const internalUrl = process.env.ARI_APP_INTERNAL_URL;
+    const internalSecret = process.env.ARI_APP_INTERNAL_SECRET;
+    if (!internalUrl || !internalSecret) {
+        console.error('❌ ARI_APP_INTERNAL_URL/ARI_APP_INTERNAL_SECRET not configured — cannot reach Asterisk to set hold music');
+        return { reachable: false };
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), HOLD_MUSIC_SYNC_TIMEOUT_MS);
+    try {
+        const response = await fetch(`${internalUrl}/internal/set-hold-music`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Chumz-Internal-Secret': internalSecret },
+            body: JSON.stringify(audioBuffer ? { audioBase64: audioBuffer.toString('base64') } : { useDefault: true }),
+            signal: controller.signal
+        });
+        if (!response.ok) {
+            const body = await response.text().catch(() => '');
+            console.error(`❌ ari-app set-hold-music responded ${response.status}: ${body}`);
+            return { reachable: true, ok: false, error: body };
+        }
+        const data = await response.json();
+        return { reachable: true, ok: true, activeClass: data.activeClass };
+    } catch (err) {
+        console.error('❌ Failed to reach ari-app to set hold music:', err.message);
+        return { reachable: false };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+// Same shape as hangupCallOnAsterisk above.
+async function claimCallOnAsterisk(sessionId, agentId) {
+    const internalUrl = process.env.ARI_APP_INTERNAL_URL;
+    const internalSecret = process.env.ARI_APP_INTERNAL_SECRET;
+    if (!internalUrl || !internalSecret) {
+        console.error('❌ ARI_APP_INTERNAL_URL/ARI_APP_INTERNAL_SECRET not configured — cannot reach Asterisk to claim call');
+        return { reachable: false };
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), INTERNAL_SYNC_TIMEOUT_MS);
+    try {
+        const response = await fetch(`${internalUrl}/internal/claim-call`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Chumz-Internal-Secret': internalSecret },
+            body: JSON.stringify({ sessionId, agentId }),
+            signal: controller.signal
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            // 409 from ari-app is a normal lost race (already taken, agent no
+            // longer available) — not a server error, so it's surfaced as
+            // `reachable: true, ok: false` with the reason, not a thrown error.
+            return { reachable: true, ok: false, reason: data.reason };
+        }
+        return { reachable: true, ok: true };
+    } catch (err) {
+        console.error('❌ Failed to reach ari-app to claim call:', err.message);
+        return { reachable: false };
     } finally {
         clearTimeout(timer);
     }
@@ -1794,6 +1881,114 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         }
 
         res.json({ hours: data });
+    });
+
+    // ── Hold music ────────────────────────────────────────────────────────
+
+    app.get('/api/hold-music', requireSupervisor, async (req, res) => {
+        const { data, error } = await supabase.from('hold_music_config').select('*').eq('id', 1).maybeSingle();
+        if (error) {
+            console.error(error);
+            return res.status(500).json({ error: 'Failed to load hold music config' });
+        }
+        res.json({ config: data ?? { active_class: 'default' } });
+    });
+
+    // multer invoked manually (not as ordinary middleware) so a rejected
+    // upload (oversized file, wrong mimetype) gets a clean JSON error here —
+    // this app has no global Express error-handling middleware, so letting
+    // multer's error reach next(err) unhandled would fall through to
+    // Express's default HTML error page instead.
+    app.post('/api/hold-music', requireSupervisor, (req, res) => {
+        uploadHoldMusic.single('file')(req, res, async multerErr => {
+            if (multerErr) {
+                const message = multerErr.code === 'LIMIT_FILE_SIZE' ? 'File too large (max 8MB)' : 'Invalid upload';
+                return res.status(400).json({ error: message });
+            }
+            if (!req.file) {
+                return res.status(400).json({ error: 'Missing or invalid audio file (mp3 only, up to 8MB)' });
+            }
+
+            const result = await setHoldMusicOnAsterisk(req.file.buffer);
+            if (!result.reachable) {
+                return res.status(502).json({ error: "Couldn't reach Asterisk to update hold music" });
+            }
+            if (!result.ok) {
+                return res.status(502).json({ error: result.error || 'Asterisk rejected the upload' });
+            }
+
+            const { data, error } = await supabase
+                .from('hold_music_config')
+                .update({
+                    active_class: 'custom',
+                    custom_filename: req.file.originalname,
+                    uploaded_at: new Date().toISOString(),
+                    uploaded_by: req.user.email
+                })
+                .eq('id', 1)
+                .select()
+                .single();
+
+            if (error) {
+                console.error(error);
+                return res.status(500).json({ error: 'Uploaded, but failed to record it — try refreshing before uploading again' });
+            }
+
+            res.json({ config: data });
+        });
+    });
+
+    app.post('/api/hold-music/reset', requireSupervisor, async (req, res) => {
+        const result = await setHoldMusicOnAsterisk(null);
+        if (!result.reachable) {
+            return res.status(502).json({ error: "Couldn't reach Asterisk to reset hold music" });
+        }
+        if (!result.ok) {
+            return res.status(502).json({ error: result.error || 'Asterisk rejected the reset' });
+        }
+
+        const { data, error } = await supabase.from('hold_music_config').update({ active_class: 'default' }).eq('id', 1).select().single();
+
+        if (error) {
+            console.error(error);
+            return res.status(500).json({ error: 'Reset on Asterisk, but failed to record it' });
+        }
+
+        res.json({ config: data });
+    });
+
+    // ── Live Queue: manual pickup ────────────────────────────────────────
+
+    // Any agent can claim any waiting caller — not requireSupervisor, this is
+    // the whole point of the feature. agentId comes only from the verified
+    // JWT (same resolution as PATCH /api/agents/me/status above), never from
+    // the request — a claim acts on Asterisk's live routing, not just a
+    // database row, so trusting a client-supplied agentId here would let one
+    // agent originate a ring to a DIFFERENT agent's softphone.
+    app.post('/api/queue/:sessionId/claim', requireAuth, async (req, res) => {
+        const agentQuery = req.user.agentId
+            ? supabase.from('agents').select('id').eq('id', req.user.agentId)
+            : supabase.from('agents').select('id').ilike('email', req.user.email);
+        const { data: agent, error: lookupError } = await agentQuery.maybeSingle();
+
+        if (lookupError || !agent) {
+            return res.status(404).json({ error: 'No agent record linked to your account yet' });
+        }
+
+        const result = await claimCallOnAsterisk(req.params.sessionId, agent.id);
+        if (!result.reachable) {
+            return res.status(502).json({ error: "Couldn't reach Asterisk to claim this call" });
+        }
+        if (!result.ok) {
+            const messages = {
+                not_waiting: 'This call was already picked up or the caller hung up',
+                agent_not_available: "You're not marked available right now",
+                ring_failed: "Couldn't ring your softphone — check your connection and try again"
+            };
+            return res.status(409).json({ error: messages[result.reason] || 'Could not claim this call' });
+        }
+
+        res.json({ ok: true });
     });
 
 };

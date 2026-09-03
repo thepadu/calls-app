@@ -31,15 +31,18 @@ const {
     getAgentSipCredentials,
     getNoAgentsForwardingDestination,
     getBusinessHours,
+    getHoldMusicConfig,
     claimAddPartyRequests,
     setAddPartyStatus,
     markMissedIfAbandoned,
     reconcileStaleCallsOnStartup,
     reconcileStaleAgentsOnStartup,
     reconcileGhostAgents,
+    getOnCallAgentsWithSip,
     sweepStaleCalls
 } = require('./supabase');
 const { writeAgentBlock, deprovisionAgentBlock } = require('./pjsipConfig');
+const { writeCustomTrack, MAX_AUDIO_BYTES: MAX_HOLD_MUSIC_BYTES } = require('./holdMusic');
 
 // ari-client's error objects don't reliably carry a string .message — for at
 // least some ARI REST error responses (e.g. a 404 against a channel that
@@ -359,6 +362,103 @@ http.createServer(async (req, res) => {
         return;
     }
 
+    if (req.method === 'POST' && req.url === '/internal/claim-call') {
+        if (!INTERNAL_SECRET || !safeEqual(req.headers['x-chumz-internal-secret'], INTERNAL_SECRET)) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Unauthorized' }));
+            return;
+        }
+
+        let body;
+        try {
+            body = await readJsonBody(req);
+        } catch (err) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+            return;
+        }
+
+        const { sessionId, agentId } = body;
+        if (typeof sessionId !== 'string' || !sessionId) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Invalid sessionId' }));
+            return;
+        }
+        if (!Number.isInteger(agentId) || agentId <= 0) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Invalid agentId' }));
+            return;
+        }
+
+        try {
+            const result = await claimQueuedCall(sessionId, agentId);
+            // A lost race (someone else already took this call, or the
+            // agent isn't actually available right now) is a normal,
+            // expected outcome, not a server error — 409 lets the frontend
+            // show "already picked up" instead of a generic failure toast.
+            res.writeHead(result.ok ? 200 : 409, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(result));
+        } catch (err) {
+            console.error(`❌ claim-call failed for ${sessionId}:`, errText(err));
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: errText(err) }));
+        }
+        return;
+    }
+
+    if (req.method === 'POST' && req.url === '/internal/set-hold-music') {
+        if (!INTERNAL_SECRET || !safeEqual(req.headers['x-chumz-internal-secret'], INTERNAL_SECRET)) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Unauthorized' }));
+            return;
+        }
+
+        let body;
+        try {
+            // Base64 inflates ~4/3 over raw bytes, plus JSON overhead — sized
+            // for MAX_HOLD_MUSIC_BYTES of actual audio, not the raw cap itself.
+            body = await readJsonBody(req, Math.ceil((MAX_HOLD_MUSIC_BYTES * 4) / 3) + 4096);
+        } catch (err) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+            return;
+        }
+
+        const { audioBase64, useDefault } = body;
+        let mohClass;
+        try {
+            if (useDefault) {
+                mohClass = 'default';
+            } else {
+                if (typeof audioBase64 !== 'string' || !audioBase64) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: 'Missing audioBase64' }));
+                    return;
+                }
+                await writeCustomTrack(Buffer.from(audioBase64, 'base64'));
+                mohClass = 'custom';
+            }
+        } catch (err) {
+            console.error('❌ set-hold-music failed:', errText(err));
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: errText(err) }));
+            return;
+        }
+
+        // A caller already waiting hears the switch immediately, not just
+        // the next queued caller — startMoh on an already-playing bridge
+        // changes the class live, it doesn't need to be stopped/restarted.
+        if (holdingBridge) {
+            await holdingBridge
+                .startMoh({ mohClass })
+                .catch(err => console.error('❌ Failed to switch live hold music:', err.message));
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, activeClass: mohClass }));
+        return;
+    }
+
     res.writeHead(404);
     res.end();
 }).listen(HEALTH_PORT, '127.0.0.1', () => console.log(`🩺 Health check listening on :${HEALTH_PORT}/healthz`));
@@ -502,6 +602,23 @@ async function getHoldingBridge() {
     if (!holdingBridgeCreation) {
         holdingBridgeCreation = client.bridges
             .create({ type: 'holding', name: HOLDING_BRIDGE_NAME })
+            .then(async bridge => {
+                // Without this, a queued caller hears dead silence for up to
+                // MAX_QUEUE_WAIT_MS (5 min) — indistinguishable, from their
+                // side, from a dropped call. Started once here rather than
+                // per-channel: a bridge-level MOH plays to every channel
+                // currently in the holding bridge and any that join it
+                // later, so this covers the whole bridge's lifetime. Read
+                // live (like getIvrConfig/getBusinessHours) rather than
+                // hardcoded, so a supervisor's uploaded track is picked up by
+                // the next bridge without a restart — an already-live bridge
+                // instead gets switched directly, see /internal/set-hold-music.
+                const { active_class: mohClass } = await getHoldMusicConfig();
+                await bridge
+                    .startMoh({ mohClass })
+                    .catch(err => console.error('❌ Failed to start music-on-hold on holding bridge:', err.message));
+                return bridge;
+            })
             .finally(() => {
                 holdingBridgeCreation = null;
             });
@@ -618,6 +735,64 @@ async function tryDequeueNext() {
     }
 }
 
+// Originates one ring leg to one agent for one waiting customer, pushing the
+// resulting channel into the shared ringGroup on success. Shared by
+// dequeueNext (called once per currently-available agent, fanning a single
+// customer out to all of them) and claimQueuedCall (called once, for the
+// one agent an agent-initiated pickup targets) — bridgeAgentLeg's claim
+// check and cleanup don't care which caller populated ringGroupBySessionId,
+// only that it exists.
+async function ringOneAgent(agent, waiting, ringGroup, customerNumber) {
+    await setAgentStatus(agent.id, 'ringing');
+    // Registered before origination starts, not after: Asterisk's
+    // StasisStart event (over the separate WebSocket) and this originate()
+    // call's HTTP response travel independently with no guaranteed
+    // ordering. Populating agentLegBySessionId only after originate()
+    // resolved meant a StasisStart that won that race found nothing here,
+    // hung the agent channel up, and — critically — never re-queued the
+    // customer, stranding them on hold with nothing left to ever dequeue
+    // them again. Pre-assigning the channel ID lets this be registered
+    // before the request is even sent.
+    const channelId = `agent-leg-${crypto.randomUUID()}`;
+    agentLegBySessionId.set(channelId, {
+        channel: waiting.channel,
+        sessionId: waiting.sessionId,
+        agentId: agent.id,
+        bridge: waiting.bridge,
+        joinedAt: waiting.joinedAt
+    });
+    try {
+        const agentChannel = await client.channels.originate({
+            channelId,
+            endpoint: `PJSIP/${agent.sipUsername}`,
+            app: APP_NAME,
+            appArgs: `agent-leg:${agent.id}:${waiting.sessionId}`,
+            // No spaces — ari-client's HTTP layer doesn't URL-encode query
+            // params correctly, and a raw space here silently produces a
+            // malformed request ("Allocation failed") rather than an
+            // encoding error.
+            callerId: customerNumber,
+            timeout: 25
+        });
+        ringGroup.push({ channel: agentChannel, agentId: agent.id });
+        ringFailureCounts.delete(agent.id);
+    } catch (err) {
+        agentLegBySessionId.delete(channelId);
+        console.error(`❌ Failed to ring agent ${agent.id}:`, errText(err));
+        const failures = (ringFailureCounts.get(agent.id) || 0) + 1;
+        if (failures >= RING_FAILURE_THRESHOLD) {
+            console.warn(
+                `⚠️ Agent ${agent.id} failed to ring ${failures} times in a row — flipping offline instead of retrying again next tick`
+            );
+            ringFailureCounts.delete(agent.id);
+            await setAgentStatus(agent.id, 'offline');
+        } else {
+            ringFailureCounts.set(agent.id, failures);
+            await setAgentStatus(agent.id, 'available');
+        }
+    }
+}
+
 // Rings every currently-available agent's browser at once — first to
 // answer wins (see bridgeAgentLeg's claim check), the rest get hung up and
 // put back to 'available' the moment someone else wins.
@@ -647,63 +822,51 @@ async function dequeueNext() {
     ringGroupBySessionId.set(waiting.sessionId, ringGroup);
 
     await Promise.all(
-        agents.map(async agent => {
-            await setAgentStatus(agent.id, 'ringing');
-            // Same reasoning as ringGroupBySessionId above, applied to the
-            // per-channel map: Asterisk's StasisStart event (over the
-            // separate WebSocket) and this originate() call's HTTP response
-            // travel independently with no guaranteed ordering. Populating
-            // agentLegBySessionId only after originate() resolved meant a
-            // StasisStart that won that race found nothing here, hung the
-            // agent channel up, and — critically — never re-queued the
-            // customer, stranding them on hold with nothing left to ever
-            // dequeue them again. Pre-assigning the channel ID lets this be
-            // registered before the request is even sent.
-            const channelId = `agent-leg-${crypto.randomUUID()}`;
-            agentLegBySessionId.set(channelId, {
-                channel: waiting.channel,
-                sessionId: waiting.sessionId,
-                agentId: agent.id,
-                bridge: waiting.bridge,
-                joinedAt: waiting.joinedAt
-            });
-            try {
-                const agentChannel = await client.channels.originate({
-                    channelId,
-                    endpoint: `PJSIP/${agent.agent_sip_credentials.sip_username}`,
-                    app: APP_NAME,
-                    appArgs: `agent-leg:${agent.id}:${waiting.sessionId}`,
-                    // No spaces — ari-client's HTTP layer doesn't URL-encode
-                    // query params correctly, and a raw space here silently
-                    // produces a malformed request ("Allocation failed")
-                    // rather than an encoding error.
-                    callerId: customerNumber,
-                    timeout: 25
-                });
-                ringGroup.push({ channel: agentChannel, agentId: agent.id });
-                ringFailureCounts.delete(agent.id);
-            } catch (err) {
-                agentLegBySessionId.delete(channelId);
-                console.error(`❌ Failed to ring agent ${agent.id}:`, errText(err));
-                const failures = (ringFailureCounts.get(agent.id) || 0) + 1;
-                if (failures >= RING_FAILURE_THRESHOLD) {
-                    console.warn(
-                        `⚠️ Agent ${agent.id} failed to ring ${failures} times in a row — flipping offline instead of retrying again next tick`
-                    );
-                    ringFailureCounts.delete(agent.id);
-                    await setAgentStatus(agent.id, 'offline');
-                } else {
-                    ringFailureCounts.set(agent.id, failures);
-                    await setAgentStatus(agent.id, 'available');
-                }
-            }
-        })
+        agents.map(agent =>
+            ringOneAgent({ id: agent.id, sipUsername: agent.agent_sip_credentials.sip_username }, waiting, ringGroup, customerNumber)
+        )
     );
 
     if (ringGroup.length === 0) {
         ringGroupBySessionId.delete(waiting.sessionId);
         waitingQueue.unshift(waiting); // nobody could actually be reached — retry next tick
     }
+}
+
+// Agent-initiated pickup from the Live Queue page, bypassing the "ring
+// every available agent" default — targets exactly one agent the caller
+// (via POST /internal/claim-call) already chose. Reuses ringOneAgent and
+// bridgeAgentLeg completely unchanged: seeding ringGroupBySessionId with a
+// single-entry group is all bridgeAgentLeg's claim check needs to treat this
+// exactly like a ring-all win, so the same simultaneous-answer race guard
+// (claimedSessions) and bridging/teardown logic apply here too — including
+// the case where two agents click "pick up" on the same call at once, or
+// one clicks it while ring-all is mid-flight for it.
+async function claimQueuedCall(sessionId, agentId) {
+    // Validated before touching waitingQueue at all — getAgentSipCredentials
+    // is a real network round trip, and removing the customer first would
+    // mean putting them back (at a since-possibly-stale position) if the
+    // agent turns out to be invalid. No await between the findIndex/splice
+    // below, so nothing else can act on this same sessionId in between.
+    const target = await getAgentSipCredentials(agentId);
+    if (!target || target.status !== 'available') return { ok: false, reason: 'agent_not_available' };
+
+    const index = waitingQueue.findIndex(w => w.sessionId === sessionId);
+    if (index === -1) return { ok: false, reason: 'not_waiting' };
+    const [waiting] = waitingQueue.splice(index, 1);
+
+    const customerNumber = normalizePhone(waiting.channel.caller.number) || 'Unknown-Caller';
+    const ringGroup = [];
+    ringGroupBySessionId.set(sessionId, ringGroup);
+
+    await ringOneAgent({ id: agentId, sipUsername: target.sipUsername }, waiting, ringGroup, customerNumber);
+
+    if (ringGroup.length === 0) {
+        ringGroupBySessionId.delete(sessionId);
+        waitingQueue.unshift(waiting); // let the normal ring-all poll retry it
+        return { ok: false, reason: 'ring_failed' };
+    }
+    return { ok: true };
 }
 
 // Ends the call for anyone who's been waiting past MAX_QUEUE_WAIT_MS —
@@ -1282,6 +1445,33 @@ async function finishOutboundCall(sessionId, status) {
     console.log(`📴 Outbound call ended: ${sessionId} (${status})`);
 }
 
+// Runtime counterpart to reconcileStaleAgentsOnStartup — see
+// getOnCallAgentsWithSip's comment for the full failure mode this closes.
+// Ground truth is Asterisk's own live channel list, not this process's own
+// in-memory bridge/pending-call state — that in-memory state is exactly
+// what's stuck (or was never populated in the first place, e.g. after a
+// crash mid-call) in the failure mode this exists to catch, so it can't be
+// used to distinguish a genuinely-ongoing call from a stuck one. An on_call
+// agent with no PJSIP channel at all right now is definitely not on a real
+// call, whatever their DB status says.
+async function reconcileGhostOnCallAgents() {
+    const onCallAgents = await getOnCallAgentsWithSip();
+    if (onCallAgents.length === 0) return [];
+
+    const channels = await client.channels.list().catch(err => {
+        console.error('❌ Failed to list channels for on-call reconciliation:', err.message);
+        return null;
+    });
+    if (!channels) return [];
+
+    const liveSipUsernames = new Set(channels.map(c => parseSipUsername(c.name)).filter(Boolean));
+    const stuck = onCallAgents.filter(a => !liveSipUsernames.has(a.sipUsername));
+    if (stuck.length === 0) return [];
+
+    await Promise.all(stuck.map(a => setAgentStatus(a.id, 'available')));
+    return stuck;
+}
+
 // Blind-add-a-party MVP: calls-app has no direct line into a live call —
 // this process is the only thing that can touch a real bridge — so a
 // supervisor/agent request lands as two columns on the call's own
@@ -1657,6 +1847,22 @@ async function main() {
                     }
                 })
                 .catch(err => console.error('❌ Ghost agent poll error:', err.message)),
+        GHOST_AGENT_POLL_MS
+    );
+
+    // Runtime counterpart to reconcileStaleAgentsOnStartup — see
+    // reconcileGhostOnCallAgents for the failure mode this closes (a stuck
+    // on_call agent silently sits out of both ring-all and internal-call
+    // routing, which rejects any target not exactly 'available', until the
+    // whole process restarts). Same cadence as the ghost-agent check above.
+    setInterval(
+        () =>
+            reconcileGhostOnCallAgents()
+                .then(stuck => {
+                    if (stuck.length > 0)
+                        console.log(`🧹 Reconciled ${stuck.length} agent(s) stuck on-call with no matching live channel`);
+                })
+                .catch(err => console.error('❌ On-call reconciliation poll error:', err.message)),
         GHOST_AGENT_POLL_MS
     );
 

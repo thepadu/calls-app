@@ -5,6 +5,7 @@ import CallScreen from '../widgets/CallScreen';
 import WrapUpModal from '../widgets/WrapUpModal';
 import FloatingDialer from '../widgets/FloatingDialer';
 import LiveAnalyticsBadge from '../widgets/LiveAnalyticsBadge';
+import ReadinessChecklist from './ReadinessChecklist';
 import { useKeyboardShortcuts } from '../../lib/useKeyboardShortcuts';
 import { useActiveCall } from '../../lib/activeCall';
 import { useSoftphone } from '../../lib/softphone';
@@ -46,6 +47,7 @@ export default function Layout({ children }: { children: ReactNode }) {
             <LiveAnalyticsBadge />
             <FloatingDialer />
             <WrapUpModal />
+            <ReadinessChecklist />
         </div>
     );
 }

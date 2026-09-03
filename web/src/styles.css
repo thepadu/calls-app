@@ -995,6 +995,73 @@ textarea {
     to { transform: translateY(0); opacity: 1; }
 }
 
+/* ── Readiness checklist ───────────────────────────────────────────── */
+
+.readiness-checklist {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    width: 260px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+    padding: var(--space-12) var(--space-14);
+    z-index: 200;
+    animation: toast-in 0.2s ease;
+}
+
+.readiness-checklist-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--ink);
+    margin-bottom: var(--space-8);
+}
+
+.readiness-dismiss {
+    background: none;
+    border: none;
+    color: var(--muted);
+    padding: var(--space-2);
+    display: flex;
+    cursor: pointer;
+}
+
+.readiness-dismiss:hover {
+    color: var(--ink);
+}
+
+.readiness-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-8);
+    padding: var(--space-6) 0;
+    font-size: 12px;
+    color: var(--ink);
+}
+
+.readiness-row-detail {
+    color: var(--muted);
+}
+
+.readiness-row-failed .readiness-row-label {
+    color: var(--danger);
+}
+
+.readiness-spin {
+    color: var(--warning);
+    animation: readiness-spin 1s linear infinite;
+}
+
+@keyframes readiness-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
 /* ── IVR editor ────────────────────────────────────────────────────── */
 
 .ivr-layout {

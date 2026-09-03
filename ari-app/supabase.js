@@ -190,6 +190,19 @@ async function getBusinessHours() {
     return data;
 }
 
+// Same fail-safe shape as getBusinessHours — if the table isn't there yet
+// (migration not applied) or the query errors, fall back to Asterisk's
+// always-present 'default' class rather than risk startMoh() failing with a
+// class that doesn't exist.
+async function getHoldMusicConfig() {
+    const { data, error } = await supabase.from('hold_music_config').select('*').eq('id', 1).maybeSingle();
+    if (error || !data) {
+        if (error) console.error('❌ Failed to load hold music config:', error.message);
+        return { active_class: 'default' };
+    }
+    return data;
+}
+
 // A call that leaves Stasis while still sitting in a pre-answer status was
 // never connected to an agent — genuinely missed. The status filter is what
 // makes this safe to call for every hung-up channel unconditionally:
@@ -338,6 +351,30 @@ async function reconcileGhostAgents() {
     return staleIds;
 }
 
+// Runtime counterpart to reconcileStaleAgentsOnStartup: reconcileGhostAgents
+// deliberately never touches on_call (a real on-call agent's heartbeat
+// legitimately goes stale while the softphone tab is busy with a call), and
+// the startup reconciliation only ever runs once, at process start. If this
+// process's own bridge-teardown listener never fires for a given call
+// (crashed listener, an orphaned channel, an unhandled exception before
+// cleanup runs), nothing else ever corrects that agent's status — they sit
+// out of both ring-all and internal-call routing (which rejects any target
+// not exactly 'available') until the whole process restarts. Returns just
+// the sip_username needed to cross-check against Asterisk's live channel
+// list — see reconcileGhostOnCallAgents in index.js for why that's the
+// ground truth used, not this process's own in-memory bookkeeping.
+async function getOnCallAgentsWithSip() {
+    const { data, error } = await supabase
+        .from('agents')
+        .select('id, agent_sip_credentials(sip_username)')
+        .eq('status', 'on_call');
+    if (error) {
+        console.error('❌ Failed to load on-call agents:', error.message);
+        return [];
+    }
+    return data.filter(a => a.agent_sip_credentials?.sip_username).map(a => ({ id: a.id, sipUsername: a.agent_sip_credentials.sip_username }));
+}
+
 module.exports = {
     supabase,
     getIvrConfig,
@@ -350,11 +387,13 @@ module.exports = {
     getAgentSipCredentials,
     getNoAgentsForwardingDestination,
     getBusinessHours,
+    getHoldMusicConfig,
     claimAddPartyRequests,
     setAddPartyStatus,
     markMissedIfAbandoned,
     reconcileStaleCallsOnStartup,
     reconcileStaleAgentsOnStartup,
     reconcileGhostAgents,
+    getOnCallAgentsWithSip,
     sweepStaleCalls
 };

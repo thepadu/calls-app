@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiFetch } from '../lib/api';
 import { useAuth } from '../lib/auth';
+import { useSoftphone } from '../lib/softphone';
 import { useToast } from '../lib/toast';
 import { formatDuration as formatWait } from '../lib/duration';
 import ConfirmDialog from '../components/ConfirmDialog';
@@ -28,9 +29,16 @@ function waitRowClass(call: QueuedCall) {
 
 export default function LiveQueue() {
     const { isSupervisor } = useAuth();
+    const { registrationState, activeCall, outgoingCall, incomingCall } = useSoftphone();
     const showToast = useToast();
     const queryClient = useQueryClient();
     const [pendingClear, setPendingClear] = useState<QueuedCall | null>(null);
+    const [claimingSessionId, setClaimingSessionId] = useState<string | null>(null);
+
+    // Same busy-guard startOutgoingCall already applies before placing a
+    // call — claiming while on/ringing another call would try to originate
+    // a second leg to a softphone that can't take it.
+    const canClaim = registrationState === 'registered' && !activeCall && !outgoingCall && !incomingCall;
 
     // No refetchInterval here — GlobalPolling (mounted once in Layout, see
     // lib/globalPolling.tsx) already owns both of these keys. Adding a
@@ -66,6 +74,25 @@ export default function LiveQueue() {
         onSettled: () => setPendingClear(null)
     });
 
+    // The actual call arrives through the normal incoming-call path (a real
+    // originate to this agent's endpoint, same as a ring-all win) — this
+    // just kicks that off. A 409 here is a normal lost race (someone else
+    // already took it, or the caller hung up), not a real error.
+    const claimCall = useMutation({
+        mutationFn: (sessionId: string) => apiFetch(`/api/queue/${sessionId}/claim`, { method: 'POST' }),
+        onSuccess: () => {
+            showToast('Ringing your softphone…');
+            queryClient.invalidateQueries({ queryKey: ['queue'] });
+        },
+        onError: (err: unknown) => showToast(errorMessage(err), 'error'),
+        onSettled: () => setClaimingSessionId(null)
+    });
+
+    function handleClaim(call: QueuedCall) {
+        setClaimingSessionId(call.session_id);
+        claimCall.mutate(call.session_id);
+    }
+
     return (
         <div>
             <div className="cards">
@@ -90,8 +117,8 @@ export default function LiveQueue() {
             <div className="panel">
                 <p className="hint">
                     Waiting callers ring every available agent's browser at once — first to answer gets
-                    the call. This page is mainly for visibility into who's waiting
-                    {isSupervisor && ' — supervisors can also end a call from here if something has gone wrong'}.
+                    the call. You can also pick up a specific caller yourself instead of waiting to be rung
+                    {isSupervisor && ', and end a call from here if something has gone wrong'}.
                 </p>
 
                 <table>
@@ -100,12 +127,12 @@ export default function LiveQueue() {
                             <th>Caller</th>
                             <th>Stage</th>
                             <th>Wait</th>
-                            {isSupervisor && <th></th>}
+                            <th></th>
                         </tr>
                     </thead>
                     <tbody>
                         {calls.length === 0 && !queueLoading && (
-                            <tr><td colSpan={isSupervisor ? 4 : 3} className="empty">Queue is empty. All callers answered.</td></tr>
+                            <tr><td colSpan={4} className="empty">Queue is empty. All callers answered.</td></tr>
                         )}
                         {calls.map(call => (
                             <tr key={call.session_id} className={waitRowClass(call)}>
@@ -116,13 +143,23 @@ export default function LiveQueue() {
                                     </span>
                                 </td>
                                 <td style={{ fontWeight: 700 }}>{formatWait(call.waitSeconds)}</td>
-                                {isSupervisor && (
-                                    <td>
+                                <td style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                                    {call.stage === 'Waiting' && (
+                                        <button
+                                            className="btn btn-link"
+                                            disabled={!canClaim || claimingSessionId === call.session_id}
+                                            title={canClaim ? undefined : "You're not available to take calls right now"}
+                                            onClick={() => handleClaim(call)}
+                                        >
+                                            Pick up
+                                        </button>
+                                    )}
+                                    {isSupervisor && (
                                         <button className="btn btn-link btn-link-danger" onClick={() => setPendingClear(call)}>
                                             End call
                                         </button>
-                                    </td>
-                                )}
+                                    )}
+                                </td>
                             </tr>
                         ))}
                     </tbody>

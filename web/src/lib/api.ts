@@ -13,9 +13,14 @@ export class ApiError extends Error {
 // app.js), so the session cookie set by /auth/google/callback rides along
 // automatically — no token storage needed here.
 export async function apiFetch(path: string, options: RequestInit = {}) {
+    // A FormData body (file uploads) must NOT get an explicit Content-Type —
+    // fetch/the browser generates one itself with the multipart boundary,
+    // and setting 'application/json' here would break multer's parsing on
+    // the server with no clear error.
+    const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
     const res = await fetch(path, {
         credentials: 'include',
-        headers: { 'Content-Type': 'application/json', ...options.headers },
+        headers: isFormData ? options.headers : { 'Content-Type': 'application/json', ...options.headers },
         ...options
     });
 
