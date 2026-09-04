@@ -37,6 +37,15 @@ process.on('uncaughtException', err => {
 
 const app = express();
 
+// This app sits behind exactly one reverse proxy — DigitalOcean App
+// Platform's own edge — which adds an X-Forwarded-For header to every
+// request. Without this, express-rate-limit (below) sees that header and,
+// unable to tell how many proxy hops are legitimate, logs a validation
+// error on every rate-limited request rather than silently trusting a
+// header a client could otherwise spoof to dodge rate limiting entirely.
+// `1` means "trust exactly one hop" — matches DO App Platform's setup.
+app.set('trust proxy', 1);
+
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 app.use(cookieParser());
@@ -118,57 +127,32 @@ app.post('/voice', webhookLimiter, verifyAtWebhookSecret, (req, res) => {
 });
 
 
-// 🔹 EVENTS CALLBACK (UPSERT)
+// 🔹 EVENTS CALLBACK — Africa's Talking's legacy pre-trunk status webhook.
+// Confirmed still live in production (2026-09-04: fresh events arriving
+// alongside real, trunk-routed calls) despite the SIP trunk migration this
+// was written against being long done — AT fires this independently of
+// which delivery mechanism actually carries the call's media. This no
+// longer writes to call_logs (see DECISIONS.md): sessionId here is AT's own
+// `ATVId_...` id, never the real Asterisk channel id ari-app logs under, so
+// every upsert here was a guaranteed duplicate row, never a legitimate
+// merge — actively confusing on the dashboard, not just redundant. Still
+// acks 200 and still flips an agent offline on their leg ending, the one
+// thing nothing else observes.
 app.post('/events', webhookLimiter, verifyAtWebhookSecret, async (req, res) => {
     console.log('📡 EVENT:', req.body);
 
-    const {
-        sessionId,
-        isActive,
-        durationInSeconds,
-        direction,
-        callerNumber,
-        destinationNumber
-    } = req.body;
-
-    const caller = normalizePhone(callerNumber);
+    const { isActive, durationInSeconds, destinationNumber } = req.body;
     const destination = normalizePhone(destinationNumber);
 
     let status = 'unknown';
-
     if (isActive === '1') status = 'ongoing';
     if (isActive === '0' && durationInSeconds > 0) status = 'completed';
     if (isActive === '0' && durationInSeconds == 0) status = 'failed';
 
-    // A caller sitting in <Enqueue> hold is itself still an "active" call
-    // from AT's perspective, so isActive alone can't distinguish "on hold"
-    // from "just bridged to an agent" — that would flip the row to 'ongoing'
-    // the moment this fires while someone's still genuinely waiting,
-    // vanishing them from the Live Queue page before any agent picked up.
-    // Real inbound calls are queued/bridged by ari-app now (see
-    // enterQueue/bridgeAgentLeg), which knows for certain when a Dequeue-
-    // equivalent bridge actually happens; this only guards against this
-    // handler racing ahead of that.
-    const { data: existingRow, error: existingRowError } = await supabase
-        .from('call_logs')
-        .select('status')
-        .eq('session_id', sessionId)
-        .maybeSingle();
-    if (existingRowError) console.error('❌ /events: failed to read existing call_logs row:', existingRowError.message);
-
-    if (existingRow?.status === 'queued' && status === 'ongoing') {
-        status = 'queued';
-    }
-
-    // Dial legs to an agent land here as their own event. We tag them with
-    // agent_number for stats. Presence transitions to 'available'/'on_call'
-    // are owned by ari-app (it knows precisely what's happening); this
-    // handler only reacts to the whole call ending, since that's the one
-    // agent-presence transition nothing else observes.
-    // NOTE: field name/behavior assumed from AT's docs, and unverified
-    // whether this handler still receives any traffic at all now that real
-    // calls route through the SIP trunk — confirm against the "📡 EVENT" log
-    // on a live call before relying on this for anything.
+    // Presence transitions to 'available'/'on_call' are owned by ari-app (it
+    // knows precisely what's happening); this handler only reacts to the
+    // whole call ending, since that's the one agent-presence transition
+    // nothing else observes.
     const agentPhones = await getAgentPhones(supabase, normalizePhone);
     const matchedAgent = agentPhones.find(a => a.normalized === destination);
 
@@ -176,23 +160,6 @@ app.post('/events', webhookLimiter, verifyAtWebhookSecret, async (req, res) => {
         const { error: agentStatusError } = await supabase.from('agents').update({ status: 'offline' }).eq('phone', matchedAgent.phone);
         if (agentStatusError) console.error('❌ /events: failed to set agent offline:', agentStatusError.message);
     }
-
-    // call_logs is this system's canonical record of what happened on every
-    // call — logging (not just silently proceeding) if this write fails is
-    // the difference between a rare Supabase hiccup being visible/alertable
-    // vs. losing a call's outcome with no trace anywhere. Still acks 200 to
-    // Africa's Talking regardless — AT's own webhook-retry behavior isn't
-    // well-understood/controlled by us, so this is a monitoring fix, not a
-    // retry-triggering one.
-    const { error: upsertError } = await supabase.from('call_logs').upsert({
-        session_id: sessionId,
-        caller,
-        agent_number: matchedAgent ? destination : undefined,
-        status,
-        duration: durationInSeconds,
-        direction
-    }, { onConflict: 'session_id' });
-    if (upsertError) console.error('❌ /events: failed to upsert call_logs:', upsertError.message);
 
     res.sendStatus(200);
 });

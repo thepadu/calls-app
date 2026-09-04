@@ -34,6 +34,7 @@ const {
     getHoldMusicConfig,
     claimAddPartyRequests,
     setAddPartyStatus,
+    sweepStaleAddPartyRequests,
     markMissedIfAbandoned,
     reconcileStaleCallsOnStartup,
     reconcileStaleAgentsOnStartup,
@@ -76,12 +77,18 @@ const QUEUE_POLL_MS = 3000;
 // that ever ends the call for them.
 const MAX_QUEUE_WAIT_MS = 5 * 60 * 1000;
 const ADD_PARTY_POLL_MS = 3000;
+// Covers a request orphaned before this process ever learned its session id
+// — see sweepStaleAddPartyRequests (supabase.js) for the full failure mode.
+// Comfortably longer than originateAddPartyLeg's own 30s ring timeout, so
+// this never fires on a request that's still genuinely in flight.
+const ADD_PARTY_STALE_MAX_AGE_MS = 2 * 60 * 1000;
 // Catches call_logs rows stuck in a non-terminal status with nothing left to
 // ever resolve them — an orphaned outbound-agent leg from a mid-call
-// restart, or a row from Africa's Talking's legacy /events webhook (its own
-// ATVId_-prefixed session ids aren't real Asterisk channel ids, so this
+// restart, or (for any row written before calls-app stopped doing this, see
+// DECISIONS.md) one of Africa's Talking's legacy /events-webhook rows, whose
+// own ATVId_-prefixed session ids aren't real Asterisk channel ids, so this
 // process's channel-based reconciliation can never recognize one as
-// abandoned). 20 minutes is short enough to clear orphans quickly; a real
+// abandoned. 20 minutes is short enough to clear orphans quickly; a real
 // call still running past that isn't harmed — its own eventual completion
 // write overwrites this by session_id regardless.
 const STALE_CALL_ONGOING_MAX_AGE_MS = 20 * 60 * 1000;
@@ -1719,12 +1726,37 @@ async function main() {
     // reconciled back from stale on-call/ringing yet.
     //
     // This process owns zero in-memory state for anything that was already
-    // ivr_started/queued/ongoing before it started — a prior instance's
-    // crash or a routine deploy restart both orphan those rows the same
-    // way. Left alone they'd sit in call_logs looking "live" forever, since
-    // nothing would ever move them to a terminal status again.
-    const reconciled = await reconcileStaleCallsOnStartup();
+    // ivr_started/queued/dialing/ongoing before it started — a prior
+    // instance's crash or a routine deploy restart both orphan those rows
+    // the same way. But Asterisk itself doesn't restart with this process —
+    // a caller who was genuinely still on hold, or a call already bridged to
+    // an agent, is still really happening regardless — so this can't just
+    // trust call_logs' own status; client.channels.list() is the ground
+    // truth reconcileStaleCallsOnStartup checks each row against (see its
+    // own comment for the full reasoning).
+    const startupChannels = await client.channels.list().catch(err => {
+        console.error('❌ Failed to list channels for startup reconciliation:', err.message);
+        return [];
+    });
+    const liveChannelIds = new Set(startupChannels.map(c => c.id));
+
+    const { reconciled, toHangUp } = await reconcileStaleCallsOnStartup(liveChannelIds);
     if (reconciled > 0) console.log(`🧹 Reconciled ${reconciled} stale in-progress call(s) from before this restart`);
+    if (toHangUp.length > 0) {
+        console.log(`📴 Hanging up ${toHangUp.length} orphaned pre-bridge call(s) still live in Asterisk from before this restart`);
+        await Promise.all(
+            toHangUp.map(sessionId =>
+                client.channels.hangup({ channelId: sessionId }).catch(err => {
+                    // Already gone by the time we got to it (caller hung up
+                    // first) — not an error, same race the /internal/hangup-call
+                    // route already tolerates.
+                    if (!errText(err).includes('Channel not found')) {
+                        console.error(`❌ Failed to hang up orphaned channel ${sessionId}:`, errText(err));
+                    }
+                })
+            )
+        );
+    }
 
     const staleAgentsReconciled = await reconcileStaleAgentsOnStartup();
     if (staleAgentsReconciled > 0)
@@ -1744,6 +1776,15 @@ async function main() {
                     if (swept.length > 0) console.log(`🧹 Swept ${swept.length} stale call_logs row(s)`);
                 })
                 .catch(err => console.error('❌ Stale-call sweep poll error:', err.message)),
+        STALE_CALL_SWEEP_MS
+    );
+    setInterval(
+        () =>
+            sweepStaleAddPartyRequests(ADD_PARTY_STALE_MAX_AGE_MS)
+                .then(swept => {
+                    if (swept.length > 0) console.log(`🧹 Swept ${swept.length} stale add-party request(s)`);
+                })
+                .catch(err => console.error('❌ Stale add-party sweep poll error:', err.message)),
         STALE_CALL_SWEEP_MS
     );
 

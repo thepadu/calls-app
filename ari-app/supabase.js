@@ -163,7 +163,7 @@ async function getNoAgentsForwardingDestination() {
 async function claimAddPartyRequests() {
     const { data, error } = await supabase
         .from('call_logs')
-        .update({ add_party_status: 'dialing' })
+        .update({ add_party_status: 'dialing', add_party_updated_at: new Date().toISOString() })
         .eq('add_party_status', 'requested')
         .select('session_id, add_party_destination');
     if (error) {
@@ -174,8 +174,36 @@ async function claimAddPartyRequests() {
 }
 
 async function setAddPartyStatus(sessionId, status) {
-    const { error } = await supabase.from('call_logs').update({ add_party_status: status }).eq('session_id', sessionId);
+    const { error } = await supabase
+        .from('call_logs')
+        .update({ add_party_status: status, add_party_updated_at: new Date().toISOString() })
+        .eq('session_id', sessionId);
     if (error) console.error('❌ Failed to update add-party status:', error.message);
+}
+
+// Covers a gap the two in-code recovery paths in index.js (bridgeAddPartyDest's
+// StasisEnd handler, completeAddParty's bridge-race catch) can't: those only
+// ever run for a leg this process actually originated. If claimAddPartyRequests'
+// own UPDATE above commits on Supabase's side but this process never receives
+// the response (confirmed live — AbortError from timeoutFetch's 8s timeout,
+// or a transient Bad Gateway, both seen in production), the row is left at
+// 'dialing' with this process never having learned the session id exists —
+// nothing else ever looks at it again, since the next poll only claims
+// 'requested' rows. Same shape as sweepStaleCalls: age-based reconciliation
+// of a non-terminal status, run on the same interval.
+async function sweepStaleAddPartyRequests(maxAgeMs) {
+    const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
+    const { data, error } = await supabase
+        .from('call_logs')
+        .update({ add_party_status: 'failed' })
+        .eq('add_party_status', 'dialing')
+        .lt('add_party_updated_at', cutoff)
+        .select('session_id');
+    if (error) {
+        console.error('❌ Stale add-party sweep failed:', error.message);
+        return [];
+    }
+    return data ?? [];
 }
 
 // Fails safe: if the table doesn't exist yet (migration not applied) or the
@@ -204,52 +232,97 @@ async function getHoldMusicConfig() {
 }
 
 // A call that leaves Stasis while still sitting in a pre-answer status was
-// never connected to an agent — genuinely missed. The status filter is what
-// makes this safe to call for every hung-up channel unconditionally:
-// 'ongoing' (already bridged) is deliberately excluded, so this can never
-// race with — or overwrite — the real 'completed' outcome that the bridge's
-// own cleanup path sets.
+// never connected to an agent — genuinely missed. 'ongoing' gets 'completed'
+// (not 'failed') here for exactly one reason: a call that survived an
+// ari-app restart mid-bridge (see reconcileStaleCallsOnStartup) has no
+// teardown() closure left to ever write its real outcome — this global
+// StasisEnd handler is the only thing left that will ever see it end, and
+// something did answer it, so it doesn't belong in missed-call stats. Both
+// updates are safe to run unconditionally for every hung-up channel: each
+// only ever matches a row still sitting in the exact status it targets, so
+// a call whose own teardown() already wrote 'completed'/'failed' first is
+// simply a no-op here — this can never overwrite that real outcome.
 async function markMissedIfAbandoned(sessionId) {
-    const { error } = await supabase
-        .from('call_logs')
-        .update({ status: 'failed' })
-        .eq('session_id', sessionId)
-        .in('status', ['ivr_started', 'input_received', 'queued']);
-    if (error) console.error('❌ Failed to mark abandoned call as failed:', error.message);
+    const [preBridge, ongoing] = await Promise.all([
+        supabase
+            .from('call_logs')
+            .update({ status: 'failed' })
+            .eq('session_id', sessionId)
+            .in('status', ['ivr_started', 'input_received', 'queued']),
+        supabase
+            .from('call_logs')
+            .update({ status: 'completed' })
+            .eq('session_id', sessionId)
+            .eq('status', 'ongoing')
+    ]);
+    if (preBridge.error) console.error('❌ Failed to mark abandoned call as failed:', preBridge.error.message);
+    if (ongoing.error) console.error('❌ Failed to close out orphaned ongoing call:', ongoing.error.message);
 }
 
 // Runs once at startup. This process's in-memory queue/ring-group state
 // always starts empty, so any call_logs row still sitting in a non-terminal
-// status is necessarily orphaned from a previous process instance (crash or
-// deploy restart) — nothing going forward will ever resolve it otherwise,
-// and it would sit in the dashboard's "live" views forever.
-async function reconcileStaleCallsOnStartup() {
+// status is orphaned from a previous process instance (crash or deploy
+// restart) — but ari-app restarting doesn't touch Asterisk itself, so
+// "orphaned in the database" and "the real channel is gone" are two
+// different things. `liveChannelIds` (from client.channels.list(), the same
+// ground truth reconcileGhostOnCallAgents uses) is what tells them apart:
+//   - session_id not live: the channel really is gone — mark 'failed', same
+//     as before.
+//   - still live, pre-bridge (never reached an agent): nothing will ever
+//     ring an agent for this caller or time them out now — they'd otherwise
+//     sit on hold music forever. Returned (not hung up here — this module
+//     has no ARI client) so index.js can actually end the real call; the
+//     existing global StasisEnd handler's markMissedIfAbandoned then closes
+//     the row out once that hangup lands, exactly like any other abandoned
+//     call.
+//   - still live, 'ongoing': a real conversation, still being bridged by
+//     Asterisk with zero help from this process — left alone entirely
+//     (channel AND row). Forcibly cutting off a live call just because
+//     ari-app restarted would be worse than the bug this fixes; the widened
+//     markMissedIfAbandoned above closes this row out correctly once the
+//     call actually ends.
+async function reconcileStaleCallsOnStartup(liveChannelIds) {
     const { data, error } = await supabase
         .from('call_logs')
-        .update({ status: 'failed' })
-        .in('status', ['ivr_started', 'input_received', 'queued', 'ongoing'])
-        .select('session_id');
+        .select('session_id, status')
+        .in('status', ['ivr_started', 'input_received', 'queued', 'dialing', 'ongoing']);
     if (error) {
-        console.error('❌ Failed to reconcile stale calls on startup:', error.message);
-        return 0;
+        console.error('❌ Failed to load stale calls on startup:', error.message);
+        return { reconciled: 0, toHangUp: [] };
     }
-    return data?.length ?? 0;
+
+    const dead = data.filter(row => !liveChannelIds.has(row.session_id));
+    const stillLivePreBridge = data.filter(row => liveChannelIds.has(row.session_id) && row.status !== 'ongoing');
+
+    if (dead.length > 0) {
+        const { error: updateError } = await supabase
+            .from('call_logs')
+            .update({ status: 'failed' })
+            .in('session_id', dead.map(row => row.session_id));
+        if (updateError) console.error('❌ Failed to mark dead stale calls as failed:', updateError.message);
+    }
+
+    return { reconciled: dead.length, toHangUp: stillLivePreBridge.map(row => row.session_id) };
 }
 
 // Runs continuously, not just at startup — unlike reconcileStaleCallsOnStartup
-// (which can safely reconcile every non-terminal row unconditionally, since
-// this process's in-memory state is known to be empty at that exact moment),
-// this needs a real age cutoff: most non-terminal rows at any given instant
-// are just normal in-progress calls, not orphans. Two real gaps this closes:
-// 'dialing' (an outbound call whose agent-leg channel got orphaned by a
-// mid-call restart, discovered live — reconcileStaleCallsOnStartup didn't
-// even check this status), and rows written by Africa's Talking's legacy
-// /events webhook using its own ATVId_-prefixed session ids, which this
-// process's Asterisk-channel-based reconciliation can never recognize as
-// "this channel doesn't exist anymore" since it isn't a real Asterisk
-// channel id at all. A real still-in-progress call isn't harmed by this
-// running — teardown()'s own final upsert (matched by session_id) overwrites
-// whatever this wrote the moment the call actually ends for real.
+// (which checks every non-terminal row against Asterisk's real live-channel
+// list once, right when this process's own in-memory state is known to be
+// empty), this needs a real age cutoff: most non-terminal rows at any given
+// instant are just normal in-progress calls, not orphans, and there's no
+// fresh "process just started" moment here to justify a real-channel check
+// on every poll. This is the only safety net for a 'dialing' row (an
+// outbound call's agent-leg channel) orphaned by anything OTHER than an
+// ari-app restart — reconcileStaleCallsOnStartup's own real-channel check
+// already covers the restart case for every non-terminal status, 'dialing'
+// included. Also still the only thing that will ever clean up an old
+// Africa's Talking legacy /events-webhook row (from before calls-app
+// stopped writing them, see DECISIONS.md) — those use AT's own
+// ATVId_-prefixed session ids, never real Asterisk channel ids, so no
+// channel-based check could ever recognize one as abandoned. A real
+// still-in-progress call isn't harmed by this running — teardown()'s own
+// final upsert (matched by session_id) overwrites whatever this wrote the
+// moment the call actually ends for real.
 // Two thresholds, not one: a customer legitimately sitting in
 // ivr_started/input_received/queued/dialing (never yet bridged to an
 // agent) for anywhere near `maxAgeMs` is already a service failure on its
@@ -390,6 +463,7 @@ module.exports = {
     getHoldMusicConfig,
     claimAddPartyRequests,
     setAddPartyStatus,
+    sweepStaleAddPartyRequests,
     markMissedIfAbandoned,
     reconcileStaleCallsOnStartup,
     reconcileStaleAgentsOnStartup,
