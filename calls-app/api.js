@@ -1,7 +1,6 @@
 const crypto = require('crypto');
 const multer = require('multer');
 const { isValidE164, normalizePhone } = require('./lib/phone');
-const { invalidateAgentCache } = require('./lib/agentCache');
 
 // Memory storage, not disk — the file only ever needs to exist long enough
 // to be forwarded to ari-app as a base64 body (see setHoldMusicOnAsterisk);
@@ -794,7 +793,6 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         try {
             const { data, error } = await setAgentStatus(agent, status);
             if (error) throw new Error(error.message);
-            invalidateAgentCache();
             res.json({ agent: data });
         } catch (err) {
             res.status(502).json({ error: err.message });
@@ -1179,7 +1177,6 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
             return res.status(500).json({ error: 'Failed to create agent' });
         }
 
-        invalidateAgentCache();
         res.status(201).json({ agent: data });
     });
 
@@ -1233,7 +1230,6 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
             }
         }
 
-        invalidateAgentCache();
         res.json({ agent });
     });
 
@@ -1262,7 +1258,6 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
             return res.status(500).json({ error: 'Failed to delete agent' });
         }
 
-        invalidateAgentCache();
         res.json({ ok: true });
     });
 

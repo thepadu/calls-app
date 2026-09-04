@@ -5,9 +5,6 @@ const rateLimit = require('express-rate-limit');
 const path = require('path');
 const { createClient } = require('@supabase/supabase-js');
 
-const { normalizePhone } = require('./lib/phone');
-const { getAgentPhones } = require('./lib/agentCache');
-
 const authRoutes = require('./auth');
 const apiRoutes = require('./api');
 
@@ -131,36 +128,18 @@ app.post('/voice', webhookLimiter, verifyAtWebhookSecret, (req, res) => {
 // Confirmed still live in production (2026-09-04: fresh events arriving
 // alongside real, trunk-routed calls) despite the SIP trunk migration this
 // was written against being long done — AT fires this independently of
-// which delivery mechanism actually carries the call's media. This no
-// longer writes to call_logs (see DECISIONS.md): sessionId here is AT's own
-// `ATVId_...` id, never the real Asterisk channel id ari-app logs under, so
-// every upsert here was a guaranteed duplicate row, never a legitimate
-// merge — actively confusing on the dashboard, not just redundant. Still
-// acks 200 and still flips an agent offline on their leg ending, the one
-// thing nothing else observes.
-app.post('/events', webhookLimiter, verifyAtWebhookSecret, async (req, res) => {
-    console.log('📡 EVENT:', req.body);
-
-    const { isActive, durationInSeconds, destinationNumber } = req.body;
-    const destination = normalizePhone(destinationNumber);
-
-    let status = 'unknown';
-    if (isActive === '1') status = 'ongoing';
-    if (isActive === '0' && durationInSeconds > 0) status = 'completed';
-    if (isActive === '0' && durationInSeconds == 0) status = 'failed';
-
-    // Presence transitions to 'available'/'on_call' are owned by ari-app (it
-    // knows precisely what's happening); this handler only reacts to the
-    // whole call ending, since that's the one agent-presence transition
-    // nothing else observes.
-    const agentPhones = await getAgentPhones(supabase, normalizePhone);
-    const matchedAgent = agentPhones.find(a => a.normalized === destination);
-
-    if (matchedAgent && (status === 'completed' || status === 'failed')) {
-        const { error: agentStatusError } = await supabase.from('agents').update({ status: 'offline' }).eq('phone', matchedAgent.phone);
-        if (agentStatusError) console.error('❌ /events: failed to set agent offline:', agentStatusError.message);
-    }
-
+// which delivery mechanism actually carries the call's media. Used to also
+// upsert call_logs and flip a phone-matched agent offline; both removed
+// (see DECISIONS.md): the call_logs write could only ever create a
+// disconnected duplicate row (AT's own `ATVId_...` session id never matches
+// the real Asterisk channel id ari-app logs under), and the agent-offline
+// match only ever applied to the 2 of 10 agents still carrying a legacy
+// `phone` value from before the SIP-softphone flow — a real hit would have
+// force-flipped that agent offline via the *destination number happening to
+// equal their phone*, even mid-call on their actual SIP line. Kept as a
+// harmless no-op (same reasoning as /voice above) rather than removed
+// outright, since AT's account-level Voice config still points at it.
+app.post('/events', webhookLimiter, verifyAtWebhookSecret, (req, res) => {
     res.sendStatus(200);
 });
 
