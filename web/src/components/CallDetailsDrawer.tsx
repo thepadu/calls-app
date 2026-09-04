@@ -81,7 +81,7 @@ export default function CallDetailsDrawer({ call, onClose }: { call: Call | null
                 {tickets.map(t => (
                     <div key={t.id} className="call-details-ticket">
                         <div className="call-details-ticket-header">
-                            <span className="status-pill" style={{ background: TICKET_STATUS_COLORS[t.status] ?? '#757575' }}>
+                            <span className="status-pill" style={{ background: TICKET_STATUS_COLORS[t.status] ?? 'var(--status-neutral)' }}>
                                 {t.status}
                             </span>
                             <span className="hint">{t.priority} priority</span>

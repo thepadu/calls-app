@@ -66,6 +66,16 @@ export default function Tickets() {
         setTicketsPage(1);
     }
 
+    const filtersActive = !!(statusFilter || tagFilter || search);
+
+    function clearFilters() {
+        setStatusFilter('');
+        setTagFilter('');
+        setSearchDraft('');
+        setSearch('');
+        setTicketsPage(1);
+    }
+
     const ticketsParams = new URLSearchParams({ page: String(ticketsPage), pageSize: '25' });
     if (statusFilter) ticketsParams.set('status', statusFilter);
     if (tagFilter) ticketsParams.set('tag', tagFilter);
@@ -140,13 +150,15 @@ export default function Tickets() {
     // PATCH /api/tickets/:id has always existed, fully built and validated —
     // this was just never wired up to anything, so a ticket's status could
     // never actually change after creation anywhere in the app.
+    // No success toast — these fire on every inline tag/priority/status/
+    // assignee dropdown change and the row itself already visually updates,
+    // so a stacked toast per field is noise rather than new information,
+    // especially when triaging several tickets in a row. A failed save is
+    // still worth surfacing, so the error toast stays.
     const updateTicket = useMutation({
         mutationFn: ({ id, ...changes }: { id: number; status?: string; priority?: string; tag?: string | null; assigned_agent_id?: number | null; notes?: string }) =>
             apiFetch(`/api/tickets/${id}`, { method: 'PATCH', body: JSON.stringify(changes) }),
-        onSuccess: () => {
-            showToast('Ticket updated');
-            queryClient.invalidateQueries({ queryKey: ['tickets'] });
-        },
+        onSuccess: () => queryClient.invalidateQueries({ queryKey: ['tickets'] }),
         onError: (err: unknown) => showToast(errorMessage(err), 'error')
     });
 
@@ -242,6 +254,9 @@ export default function Tickets() {
                                 <option value="">All tags</option>
                                 {tags.map(t => <option key={t} value={t}>{t}</option>)}
                             </select>
+                            {filtersActive && (
+                                <button className="btn btn-secondary" onClick={clearFilters}>Clear</button>
+                            )}
                         </div>
                     </div>
                     <table>
@@ -301,7 +316,7 @@ export default function Tickets() {
                                             className="btn btn-link"
                                             title={t.notes ?? 'Add notes'}
                                             onClick={() => openNotesEditor(t)}
-                                            style={{ color: t.notes ? '#17A697' : undefined }}
+                                            style={{ color: t.notes ? 'var(--brand-text)' : undefined }}
                                         >
                                             <FileText size={16} />
                                         </button>

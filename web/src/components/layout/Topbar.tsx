@@ -29,10 +29,10 @@ const CONNECTION_LABELS: Record<RegistrationState, string> = {
 };
 
 const CONNECTION_COLORS: Record<RegistrationState, string> = {
-    registered: '#17A697',
-    registering: '#F39C12',
-    unregistered: '#F39C12',
-    failed: '#EF5350'
+    registered: 'var(--brand)',
+    registering: 'var(--warning)',
+    unregistered: 'var(--warning)',
+    failed: 'var(--danger)'
 };
 
 export default function Topbar({ onMenuClick, menuOpen }: { onMenuClick: () => void; menuOpen: boolean }) {

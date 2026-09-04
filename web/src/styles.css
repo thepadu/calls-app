@@ -35,6 +35,21 @@
     --danger-dark: #C2185B;
     --warning: #F39C12;
     --tint: #E0F5F2;
+    /* Status-pill-only colors (StatusPill.tsx/ticketStatus.ts/Topbar.tsx) —
+       "break" and "forwarded" needed their own hue, distinct from
+       --warning, to stop three unrelated concepts (urgent-transient,
+       calm-intentional-pause, missed-call-outcome) sharing one gold-orange.
+       Always rendered as white text on a solid pill background regardless
+       of theme, so — unlike the tokens above — these don't need a
+       dark-mode override. */
+    --status-break: #5B8DBE;
+    --status-forwarded: #E67E22;
+    /* Deliberately NOT --secondary — that token flips to a lighter gray in
+       dark mode (correct for its actual role, text color on a dark
+       surface), which would ruin white-on-pill contrast here. This one
+       stays fixed in both themes, matching how these pills always render
+       (white text, solid background) regardless of theme. */
+    --status-neutral: #757575;
 
     /* Spacing — an inventory of the values already in real use across this
        file (each appeared 2+ times), named after their own pixel value
@@ -81,10 +96,38 @@
        --brand-bright already exists for this exact "brighter teal for a
        dark background" role and measures 5.62:1 on the dark --surface. */
     --brand-text: var(--brand-bright);
+    /* --danger-dark (#C2185B) was never overridden here either — same
+       "needs to go lighter against a dark surface" problem, measured
+       ~2.3:1 against --surface. --danger (the already-existing "bright"
+       red used for toasts/banners) measures ~3.9-4.5:1 depending on which
+       surface it sits against — reused rather than inventing a new color,
+       same move as --brand-text above. */
+    --danger-dark: var(--danger);
+    /* --tint is always paired with --brand-text, which just became lighter
+       above — but --tint itself stayed a fixed pale mint, so the pairing
+       went from "dark text on light tint" to "light text on light tint"
+       (~2.1:1). A low-alpha wash of the brand color over the dark surface
+       keeps the same "tinted chip" look while measuring ~4.5:1 against the
+       now-brighter text. */
+    --tint: rgba(77, 184, 170, 0.12);
 }
 
 * {
     box-sizing: border-box;
+}
+
+/* Visually hidden but still reachable by screen readers — for content that
+   exists purely to be announced (aria-live status regions), not seen. */
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
 }
 
 body {

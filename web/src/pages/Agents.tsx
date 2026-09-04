@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { apiFetch } from '../lib/api';
@@ -35,9 +35,22 @@ export default function Agents() {
     const showToast = useToast();
 
     const [rosterPage, setRosterPage] = useState(1);
+    const [searchInput, setSearchInput] = useState('');
     const [search, setSearch] = useState('');
 
-    const { data: agentsData, isLoading: agentsLoading } = useQuery({
+    // Debounced rather than Calls/Tickets' draft+Apply-button pattern — this
+    // is a single live-search box, better served by "type and it just
+    // updates" a moment later than an extra click, while still avoiding a
+    // request fired on every keystroke.
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            setSearch(searchInput);
+            setRosterPage(1);
+        }, 300);
+        return () => clearTimeout(timer);
+    }, [searchInput]);
+
+    const { data: agentsData, isLoading: agentsLoading, isError: agentsIsError } = useQuery({
         queryKey: ['agents', rosterPage, search],
         queryFn: () => apiFetch(`/api/agents?page=${rosterPage}&pageSize=${PAGE_SIZE}&q=${encodeURIComponent(search)}`)
     });
@@ -46,10 +59,15 @@ export default function Agents() {
     const rosterTotal: number = agentsData?.total ?? 0;
     const rosterTotalPages: number = agentsData?.totalPages ?? 1;
 
-    function changeSearch(value: string) {
-        setSearch(value);
-        setRosterPage(1);
-    }
+    const rosterStatusMessage = agentsIsError
+        ? "Couldn't load agents."
+        : agentsLoading
+        ? 'Loading…'
+        : agents.length === 0
+        ? search
+            ? `No agents match "${search}".`
+            : 'No agents yet — add your first one.'
+        : null;
 
     const [formOpen, setFormOpen] = useState(false);
     const [editingId, setEditingId] = useState<number | null>(null);
@@ -173,20 +191,18 @@ export default function Agents() {
                 </div>
                 <p className="hint">
                     Agents with a browser softphone just go <strong>available</strong> — waiting callers ring
-                    their browser directly. Anyone not yet on a softphone falls back to the original
-                    behavior: a real, billed call to their phone to bring them onto the support queue.
+                    their browser directly. A softphone is required to take calls — an agent without one
+                    provisioned can't go available until a supervisor sets one up below.
                 </p>
 
                 <input
-                    value={search}
-                    onChange={e => changeSearch(e.target.value)}
+                    value={searchInput}
+                    onChange={e => setSearchInput(e.target.value)}
                     placeholder="Search by name or phone…"
                     style={{ marginBottom: 14 }}
                 />
 
-                {agents.length === 0 && !agentsLoading && (
-                    <p className="empty">{search ? `No agents match "${search}".` : 'No agents yet — add your first one.'}</p>
-                )}
+                {rosterStatusMessage && <p className="empty">{rosterStatusMessage}</p>}
 
                 <div className="agent-grid">
                     {agents.map(agent => (
@@ -212,7 +228,7 @@ export default function Agents() {
                                     onChange={status => toggleStatus.mutate({ id: agent.id, status: status as Agent['status'] })}
                                 />
                                 {agent.role === 'supervisor' && (
-                                    <span className="status-pill" style={{ background: '#2C3E50', marginLeft: 6 }}>
+                                    <span className="status-pill" style={{ background: 'var(--brand-dark)', marginLeft: 6 }}>
                                         Supervisor
                                     </span>
                                 )}

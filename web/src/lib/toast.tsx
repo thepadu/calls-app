@@ -16,6 +16,11 @@ let nextId = 1;
 // doesn't need to wait out the timer at all.
 const AUTO_DISMISS_MS: Record<Toast['kind'], number> = { success: 3500, error: 6000 };
 
+// A burst of repeated failures (e.g. several background reconciliation
+// errors in a row) shouldn't stack unboundedly and cover a large chunk of a
+// narrow viewport for several seconds.
+const MAX_VISIBLE_TOASTS = 4;
+
 export function ToastProvider({ children }: { children: ReactNode }) {
     const [toasts, setToasts] = useState<Toast[]>([]);
 
@@ -25,7 +30,14 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
     const show = useCallback((message: string, kind: Toast['kind'] = 'success') => {
         const id = nextId++;
-        setToasts(current => [...current, { id, message, kind }]);
+        setToasts(current => {
+            // An identical message already on screen (e.g. the same error
+            // firing repeatedly) gets refreshed in place rather than piling
+            // up as a duplicate entry.
+            const deduped = current.filter(t => !(t.message === message && t.kind === kind));
+            const next = [...deduped, { id, message, kind }];
+            return next.length > MAX_VISIBLE_TOASTS ? next.slice(next.length - MAX_VISIBLE_TOASTS) : next;
+        });
         setTimeout(() => dismiss(id), AUTO_DISMISS_MS[kind]);
     }, [dismiss]);
 

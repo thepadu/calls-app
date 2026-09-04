@@ -4,6 +4,7 @@ import { Phone, Trash2, Users } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import { useSoftphone } from '../lib/softphone';
 import { useToast } from '../lib/toast';
+import { useModalA11y } from '../lib/useModalA11y';
 import { formatPhone, isValidPhone } from '../lib/phoneFormat';
 import ConfirmDialog from '../components/ConfirmDialog';
 
@@ -69,6 +70,7 @@ export default function Contacts() {
     const contacts: Contact[] = contactsData?.contacts ?? [];
 
     const [formOpen, setFormOpen] = useState(false);
+    const modalContainerRef = useModalA11y(formOpen, () => setFormOpen(false));
     const [name, setName] = useState('');
     const [phone, setPhone] = useState('');
     const [formError, setFormError] = useState('');
@@ -197,7 +199,7 @@ export default function Contacts() {
 
             {formOpen && (
                 <div className="modal-overlay" onClick={() => setFormOpen(false)}>
-                    <div className="modal" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
+                    <div ref={modalContainerRef} className="modal" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
                         <h3>Add Contact</h3>
 
                         <label>

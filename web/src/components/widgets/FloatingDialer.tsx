@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Phone, Delete, X } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
@@ -79,6 +79,18 @@ export default function FloatingDialer() {
     function insertCountryCode() {
         setInput(i => (i.startsWith('+254') ? i : `+254${i.replace(/^0/, '')}`));
     }
+
+    // Same Escape-only convention as TicketDrawer — this popover has no
+    // backdrop and isn't a modal, so no Tab-trap, just a quick way out for a
+    // keyboard user who opened it and changed their mind.
+    useEffect(() => {
+        if (!open) return;
+        function handleKeyDown(e: KeyboardEvent) {
+            if (e.key === 'Escape') setOpen(false);
+        }
+        document.addEventListener('keydown', handleKeyDown);
+        return () => document.removeEventListener('keydown', handleKeyDown);
+    }, [open]);
 
     return (
         <div className="floating-dialer">

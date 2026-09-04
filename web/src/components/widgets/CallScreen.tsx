@@ -218,11 +218,38 @@ export default function CallScreen() {
     // itself if an incomingCall was somehow ringing at the same instant).
     const phase = incomingCall ? 'incoming' : outgoingCall ? 'outgoing' : activeCaller ? 'active' : null;
 
+    // Only the 'incoming' phase gets a role="alert" live region below —
+    // 'active' (connected) and the call ending had no screen-reader
+    // announcement at all. This tracks phase transitions and drives a
+    // separate, always-polite status region for those.
+    const [announcement, setAnnouncement] = useState('');
+    const [lingerAfterEnd, setLingerAfterEnd] = useState(false);
+    const prevPhaseRef = useRef<typeof phase>(null);
+
+    useEffect(() => {
+        const prev = prevPhaseRef.current;
+        prevPhaseRef.current = phase;
+        if (prev === phase) return;
+
+        if (phase === 'active') {
+            setAnnouncement('Call connected');
+        } else if (!phase && prev) {
+            // The whole screen unmounts the instant phase goes null (see the
+            // early return below) — without lingering a moment, the
+            // aria-live region announcing "Call ended" would already be
+            // gone before any screen reader could read it.
+            setAnnouncement('Call ended');
+            setLingerAfterEnd(true);
+            const timer = setTimeout(() => setLingerAfterEnd(false), 1500);
+            return () => clearTimeout(timer);
+        }
+    }, [phase]);
+
     // The ticket drawer can only be opened from the active-call controls, but
     // needs to survive the call ending — an agent still finishing a ticket
     // when the customer hangs up shouldn't have it snatched away just
     // because `phase` (and the call card above it) disappeared.
-    if (!phase && !quickTicketOpen) return null;
+    if (!phase && !quickTicketOpen && !lingerAfterEnd) return null;
 
     const displayNumber = phase === 'incoming' ? incomingCall!.callerNumber : phase === 'outgoing' ? outgoingCall!.remoteNumber : activeCaller;
     const addPartyStatus = polledCall?.add_party_status;
@@ -230,6 +257,7 @@ export default function CallScreen() {
 
     return (
         <div className="call-screen-stack">
+            <div aria-live="polite" role="status" className="sr-only">{announcement}</div>
             {phase && (
             <div
                 className={`call-screen call-screen-${phase} ${phase === 'incoming' && !hasGestured ? 'call-screen-pulse' : ''}`}

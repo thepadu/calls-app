@@ -38,8 +38,9 @@ function errorMessage(err: unknown) {
 function BusinessHoursPanel() {
     const queryClient = useQueryClient();
     const showToast = useToast();
+    const [confirmingEnable, setConfirmingEnable] = useState(false);
 
-    const { data } = useQuery({ queryKey: ['business-hours'], queryFn: () => apiFetch('/api/business-hours') });
+    const { data, isLoading, isError } = useQuery({ queryKey: ['business-hours'], queryFn: () => apiFetch('/api/business-hours') });
     const hours: BusinessHours | null = data?.hours ?? null;
 
     const [form, setForm] = useState<BusinessHours | null>(null);
@@ -66,7 +67,34 @@ function BusinessHoursPanel() {
         setForm({ ...form, active_days: active });
     }
 
-    if (!form) return null;
+    // Same reasoning as CallRatingPanel/CallForwarding's own "enable"
+    // toggles below — turning this on immediately changes what every
+    // caller hears outside business hours, so it gets the same confirm-on-enable
+    // guard they already have. Turning it back off needs no confirmation.
+    function handleToggleEnabled(checked: boolean) {
+        if (!form) return;
+        if (checked) {
+            setConfirmingEnable(true);
+        } else {
+            setForm({ ...form, enabled: false });
+            save.mutate({ enabled: false });
+        }
+    }
+
+    // Previously `if (!form) return null` unmounted the whole panel —
+    // heading included — until the query resolved, while its sibling
+    // panels below rendered immediately, causing a visible page shift. The
+    // shell now always renders; only the form body waits on real data.
+    if (!form) {
+        return (
+            <div className="panel">
+                <div className="panel-header">
+                    <h3>Business hours</h3>
+                </div>
+                <p className="empty">{isError ? "Couldn't load business hours." : isLoading ? 'Loading…' : null}</p>
+            </div>
+        );
+    }
 
     const dirty =
         !hours ||
@@ -81,14 +109,7 @@ function BusinessHoursPanel() {
             <div className="panel-header">
                 <h3>Business hours</h3>
                 <label className="toggle-switch">
-                    <input
-                        type="checkbox"
-                        checked={form.enabled}
-                        onChange={e => {
-                            setForm({ ...form, enabled: e.target.checked });
-                            save.mutate({ enabled: e.target.checked });
-                        }}
-                    />
+                    <input type="checkbox" checked={form.enabled} onChange={e => handleToggleEnabled(e.target.checked)} />
                     <span className="toggle-track"><span className="toggle-knob" /></span>
                 </label>
             </div>
@@ -96,6 +117,19 @@ function BusinessHoursPanel() {
                 Outside these hours, callers hear the message below instead of the normal menu — no agent
                 needs to be online for this to work. Times are East Africa Time.
             </p>
+
+            <ConfirmDialog
+                open={confirmingEnable}
+                title="Turn on business hours?"
+                message="Callers outside the configured hours will immediately hear the after-hours message below instead of the normal menu, starting with the next call."
+                confirmLabel="Turn on"
+                onConfirm={() => {
+                    setForm({ ...form, enabled: true });
+                    save.mutate({ enabled: true });
+                    setConfirmingEnable(false);
+                }}
+                onCancel={() => setConfirmingEnable(false)}
+            />
 
             <div className="forwarding-add-row" style={{ gridTemplateColumns: '1fr 1fr', maxWidth: 360 }}>
                 <label>
@@ -156,7 +190,7 @@ function CallRatingPanel() {
     const showToast = useToast();
     const [confirmingEnable, setConfirmingEnable] = useState(false);
 
-    const { data } = useQuery({ queryKey: ['ivr-config'], queryFn: () => apiFetch('/api/ivr-config') });
+    const { data, isError } = useQuery({ queryKey: ['ivr-config'], queryFn: () => apiFetch('/api/ivr-config') });
 
     const toggle = useMutation({
         mutationFn: (rating_enabled: boolean) =>
@@ -184,6 +218,7 @@ function CallRatingPanel() {
                     After the agent hangs up, the caller hears a 1-5 rating prompt before the line
                     disconnects. Off by default — changes live call flow.
                 </p>
+                {isError && <p className="error" style={{ marginBottom: 0 }}>Couldn't load the current setting.</p>}
             </div>
             <label className="toggle-switch">
                 <input
@@ -221,7 +256,7 @@ function HoldMusicPanel() {
     const showToast = useToast();
     const [file, setFile] = useState<File | null>(null);
 
-    const { data } = useQuery({ queryKey: ['hold-music'], queryFn: () => apiFetch('/api/hold-music') });
+    const { data, isError } = useQuery({ queryKey: ['hold-music'], queryFn: () => apiFetch('/api/hold-music') });
     const config: HoldMusicConfig = data?.config ?? { active_class: 'default' };
 
     const upload = useMutation({
@@ -252,6 +287,7 @@ function HoldMusicPanel() {
             <div className="panel-header">
                 <h3>Hold music</h3>
             </div>
+            {isError && <p className="error">Couldn't load the current hold music setting.</p>}
             <p className="hint">
                 Played to callers waiting in the queue. Upload an MP3 (up to 8MB) to replace it, or reset
                 back to the default at any time — takes effect immediately, including for callers already
@@ -293,8 +329,8 @@ export default function CallForwarding() {
     const queryClient = useQueryClient();
     const showToast = useToast();
 
-    const { data: configData } = useQuery({ queryKey: ['forwarding-config'], queryFn: () => apiFetch('/api/forwarding-config') });
-    const { data: rulesData } = useQuery({ queryKey: ['forwarding-rules'], queryFn: () => apiFetch('/api/forwarding-rules') });
+    const { data: configData, isError: configIsError } = useQuery({ queryKey: ['forwarding-config'], queryFn: () => apiFetch('/api/forwarding-config') });
+    const { data: rulesData, isError: rulesIsError } = useQuery({ queryKey: ['forwarding-rules'], queryFn: () => apiFetch('/api/forwarding-rules') });
 
     const rules: Rule[] = rulesData?.rules ?? [];
 
@@ -349,6 +385,7 @@ export default function CallForwarding() {
                 <div>
                     <h3 style={{ marginBottom: 2 }}>Call forwarding</h3>
                     <p className="hint" style={{ marginBottom: 0 }}>Route calls elsewhere based on the rules below.</p>
+                    {configIsError && <p className="error" style={{ marginBottom: 0 }}>Couldn't load the current setting.</p>}
                 </div>
                 <label className="toggle-switch">
                     <input
@@ -382,6 +419,7 @@ export default function CallForwarding() {
                     Hours panel above, which has its own dedicated message.
                 </p>
 
+                {rulesIsError && <p className="error">Couldn't load forwarding rules.</p>}
                 {rules.map(rule => (
                     <div className="forwarding-rule-row" key={rule.id}>
                         <span>{CONDITIONS.find(c => c.value === rule.condition)?.label ?? rule.condition}</span>

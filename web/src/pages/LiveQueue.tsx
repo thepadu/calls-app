@@ -47,7 +47,7 @@ export default function LiveQueue() {
     // roughly doubling actual traffic while this page is open. This still
     // gets live updates for free, since every observer of the same cache
     // entry re-renders whenever GlobalPolling's fetch refreshes it.
-    const { data: queueData, isLoading: queueLoading } = useQuery({
+    const { data: queueData, isLoading: queueLoading, isError: queueIsError } = useQuery({
         queryKey: ['queue'],
         queryFn: () => apiFetch('/api/queue')
     });
@@ -59,6 +59,17 @@ export default function LiveQueue() {
 
     const calls: QueuedCall[] = queueData?.calls ?? [];
     const stats = queueData?.stats ?? { inQueue: 0, avgWaitSeconds: 0, longestWaitSeconds: 0 };
+
+    // A failed fetch previously left the table simply empty — indistinguishable
+    // from a genuinely empty queue. isLoading only covers the initial fetch,
+    // not every 5-30s background refetch, so this doesn't flash on every poll.
+    const statusMessage = queueIsError
+        ? "Couldn't load the queue."
+        : queueLoading
+        ? 'Loading…'
+        : calls.length === 0
+        ? 'Queue is empty. All callers answered.'
+        : null;
 
     // Tries a real hangup on Asterisk first (see the backend route) — a
     // stuck-looking row usually clears itself on its own, but a supervisor
@@ -131,8 +142,8 @@ export default function LiveQueue() {
                         </tr>
                     </thead>
                     <tbody>
-                        {calls.length === 0 && !queueLoading && (
-                            <tr><td colSpan={4} className="empty">Queue is empty. All callers answered.</td></tr>
+                        {statusMessage && (
+                            <tr><td colSpan={4} className="empty">{statusMessage}</td></tr>
                         )}
                         {calls.map(call => (
                             <tr key={call.session_id} className={waitRowClass(call)}>

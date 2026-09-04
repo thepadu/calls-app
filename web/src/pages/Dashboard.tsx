@@ -41,29 +41,36 @@ type AgentStat = {
 export default function Dashboard() {
     const { user, isSupervisor } = useAuth();
 
-    const { data: callsData } = useQuery({
+    const { data: callsData, isLoading: callsLoading, isError: callsIsError } = useQuery({
         queryKey: ['calls-summary'],
         queryFn: () => apiFetch('/api/calls'),
         refetchInterval: 10000
     });
 
-    const { data: liveData, isLoading: liveLoading } = useQuery({
+    const { data: liveData, isLoading: liveLoading, isError: liveIsError } = useQuery({
         queryKey: ['calls-live'],
         queryFn: () => apiFetch('/api/calls/live'),
         refetchInterval: 10000
     });
 
-    const { data: statsData, isLoading: statsLoading } = useQuery({
+    const { data: statsData, isLoading: statsLoading, isError: statsIsError } = useQuery({
         queryKey: ['agents-stats'],
         queryFn: () => apiFetch('/api/agents/stats'),
         refetchInterval: 30000
     });
 
-    const { data: hourData, isLoading: hourLoading } = useQuery({
+    const { data: hourData, isLoading: hourLoading, isError: hourIsError } = useQuery({
         queryKey: ['calls-by-hour'],
         queryFn: () => apiFetch('/api/calls/by-hour'),
         refetchInterval: 60000
     });
+
+    // First paint with none of the four queries resolved yet looked
+    // identical to "this dashboard genuinely has no data" — every card a
+    // dash. Same fix Analytics.tsx already applies to its own five queries;
+    // gated on the initial load specifically (isLoading, not isFetching) so
+    // the 10-60s background refreshes don't blank the page every time.
+    const initialLoading = callsLoading && liveLoading && statsLoading && hourLoading;
 
     const summary: Summary | undefined = callsData?.summary;
     const live: Call[] = liveData?.calls ?? [];
@@ -72,8 +79,26 @@ export default function Dashboard() {
     const leaderboard = [...agentStats].sort((a, b) => b.answered - a.answered).slice(0, 5);
     const myStats = user?.agentId != null ? agentStats.find(a => a.id === user.agentId) : undefined;
 
+    const liveStatusMessage = liveIsError ? "Couldn't load live calls." : liveLoading ? 'Loading…' : live.length === 0 ? 'No calls in progress' : null;
+    const leaderboardStatusMessage = statsIsError
+        ? "Couldn't load agent stats."
+        : statsLoading
+        ? 'Loading…'
+        : leaderboard.length === 0
+        ? 'No agent call data yet'
+        : null;
+
+    if (initialLoading) {
+        return (
+            <div>
+                <p className="empty">Loading dashboard…</p>
+            </div>
+        );
+    }
+
     return (
         <div>
+            {callsIsError && <p className="error" style={{ marginBottom: 14 }}>Some numbers below may be out of date — couldn't refresh call totals.</p>}
             <div className="cards">
                 <div className="card">
                     <div className="card-label">Total Calls</div>
@@ -106,7 +131,7 @@ export default function Dashboard() {
                 </div>
             </div>
 
-            <CallsByHourChart hours={hourData?.hours ?? []} isLoading={hourLoading} />
+            <CallsByHourChart hours={hourData?.hours ?? []} isLoading={hourLoading} isError={hourIsError} />
 
             <div className="panel">
                 <div className="panel-header">
@@ -117,7 +142,7 @@ export default function Dashboard() {
                         </span>
                     )}
                 </div>
-                {live.length === 0 && !liveLoading && <p className="empty">No calls in progress</p>}
+                {liveStatusMessage && <p className="empty">{liveStatusMessage}</p>}
                 {live.length > 0 && (
                     <table>
                         <thead>
@@ -152,7 +177,7 @@ export default function Dashboard() {
                         <h3 style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Trophy size={18} /> Top Agents</h3>
                         <Link to="/analytics" className="btn-link">Full analytics →</Link>
                     </div>
-                    {leaderboard.length === 0 && !statsLoading && <p className="empty">No agent call data yet</p>}
+                    {leaderboardStatusMessage && <p className="empty">{leaderboardStatusMessage}</p>}
                     {leaderboard.length > 0 && (
                         <table>
                             <tbody>

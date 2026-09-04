@@ -9,6 +9,12 @@ export function useModalA11y(open: boolean, onClose: () => void) {
     useEffect(() => {
         if (!open) return;
 
+        // Whatever had focus before this modal opened (almost always the
+        // button that triggered it) — restored on close below, so keyboard
+        // users land back where they were instead of falling through to
+        // <body> with no visible focus indicator anywhere.
+        const previouslyFocused = document.activeElement as HTMLElement | null;
+
         const container = containerRef.current;
         const focusable = container?.querySelectorAll<HTMLElement>(
             'a[href], button:not([disabled]), input, select, textarea, [tabindex]:not([tabindex="-1"])'
@@ -36,7 +42,10 @@ export function useModalA11y(open: boolean, onClose: () => void) {
         }
 
         document.addEventListener('keydown', handleKeyDown);
-        return () => document.removeEventListener('keydown', handleKeyDown);
+        return () => {
+            document.removeEventListener('keydown', handleKeyDown);
+            previouslyFocused?.focus();
+        };
     }, [open, onClose]);
 
     return containerRef;

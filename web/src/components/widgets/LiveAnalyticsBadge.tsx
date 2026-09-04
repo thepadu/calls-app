@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { apiFetch } from '../../lib/api';
 
@@ -11,6 +11,17 @@ export default function LiveAnalyticsBadge() {
         refetchInterval: 10000,
         enabled: open
     });
+
+    // Same Escape-only convention as TicketDrawer/FloatingDialer — no
+    // backdrop, not a modal, just a quick way out for a keyboard user.
+    useEffect(() => {
+        if (!open) return;
+        function handleKeyDown(e: KeyboardEvent) {
+            if (e.key === 'Escape') setOpen(false);
+        }
+        document.addEventListener('keydown', handleKeyDown);
+        return () => document.removeEventListener('keydown', handleKeyDown);
+    }, [open]);
 
     const summary = data?.summary;
 

@@ -7,22 +7,22 @@
 // the fastest things to scan across a table full of these pills even
 // though text is always shown alongside it too.
 export const STATUS_COLORS: Record<string, string> = {
-    available: '#17A697',
-    on_call: '#4DB8AA',
-    ringing: '#F39C12',
-    break: '#5B8DBE',
-    offline: '#757575',
-    completed: '#17A697',
-    ongoing: '#4DB8AA',
-    queued: '#4DB8AA',
-    dialing: '#4DB8AA',
-    failed: '#EF5350',
-    forwarded: '#E67E22',
-    after_hours: '#757575'
+    available: 'var(--brand)',
+    on_call: 'var(--brand-bright)',
+    ringing: 'var(--warning)',
+    break: 'var(--status-break)',
+    offline: 'var(--status-neutral)',
+    completed: 'var(--brand)',
+    ongoing: 'var(--brand-bright)',
+    queued: 'var(--brand-bright)',
+    dialing: 'var(--brand-bright)',
+    failed: 'var(--danger)',
+    forwarded: 'var(--status-forwarded)',
+    after_hours: 'var(--status-neutral)'
 };
 
 export default function StatusPill({ value, label }: { value: string; label?: string }) {
-    const color = STATUS_COLORS[value] || '#757575';
+    const color = STATUS_COLORS[value] || 'var(--status-neutral)';
     return (
         <span className="status-pill" style={{ background: color }}>
             {label ?? value.replace('_', ' ')}
