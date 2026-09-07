@@ -1,5 +1,21 @@
 require('dotenv').config();
 
+// Every log line up to now had no timestamp at all — every investigation
+// this had ever come up in (the stuck-call bug, the TURN-password bug) had
+// to reverse-engineer real time from an Asterisk channel id (which happens
+// to embed one) or cross-reference journalctl/full.log by hand. Wrapping
+// the three console methods once here, before anything else in this file
+// runs, covers every call site in this process (including supabase.js,
+// which requires this file's already-patched global console) without
+// having to touch ~100 individual call sites or risk missing new ones added
+// later. ISO 8601 with a timezone offset, not a bare Date().toString(),
+// so log lines sort correctly and paste cleanly next to Supabase's own
+// timestamptz columns.
+for (const method of ['log', 'warn', 'error']) {
+    const original = console[method].bind(console);
+    console[method] = (...args) => original(`[${new Date().toISOString()}]`, ...args);
+}
+
 // A crash here drops every active call on the system, not just one — worth
 // containing whatever can be contained. An unhandled rejection (Node 15+
 // terminates by default) is logged and the process keeps running, since
