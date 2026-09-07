@@ -1,4 +1,5 @@
 const express = require('express');
+const helmet = require('helmet');
 const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
@@ -39,6 +40,36 @@ const app = express();
 // header a client could otherwise spoof to dodge rate limiting entirely.
 // `1` means "trust exactly one hop" — matches DO App Platform's setup.
 app.set('trust proxy', 1);
+
+// helmet's *defaults* would silently break the one thing this dashboard
+// can't afford to break: the browser softphone. Its CSP default only
+// allows 'self', but the softphone (web/src/lib/softphone.tsx) opens a
+// WebSocket straight to sip.chumz.online (a different origin — the
+// Asterisk VPS, not this app) for SIP signaling, and the dashboard pulls
+// its one font family from Google Fonts. Every directive below is a real,
+// currently-used origin, checked directly against web/src before writing
+// this, not a guess — connectSrc in particular had to include the VPS's
+// wss:// origin explicitly, or every agent's softphone would have silently
+// stopped registering the moment this shipped. styleSrc allows
+// 'unsafe-inline' because this codebase uses React's inline `style` prop
+// throughout (confirmed: 15 files) — CSP's style-src does govern that
+// attribute, not just <style> tags.
+app.use(
+    helmet({
+        contentSecurityPolicy: {
+            directives: {
+                defaultSrc: ["'self'"],
+                scriptSrc: ["'self'"],
+                styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+                fontSrc: ["'self'", 'https://fonts.gstatic.com'],
+                imgSrc: ["'self'", 'data:'],
+                connectSrc: ["'self'", 'wss://sip.chumz.online', 'https://sip.chumz.online'],
+                objectSrc: ["'none'"],
+                frameAncestors: ["'none'"]
+            }
+        }
+    })
+);
 
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
