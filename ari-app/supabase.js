@@ -218,6 +218,21 @@ async function getBusinessHours() {
     return data;
 }
 
+// 'available' alone (what getAvailableAgentsWithSip checks) undercounts on
+// purpose here — an agent mid-call ('on_call') isn't a problem worth
+// paging anyone about, they'll free up; the actual "is anyone even logged
+// in" signal this exists for needs anything that isn't 'offline'. Returns
+// -1 (not 0) on error so a transient query failure can never look
+// indistinguishable from a genuine zero-agents incident to the caller.
+async function getLoggedInAgentCount() {
+    const { count, error } = await supabase.from('agents').select('*', { count: 'exact', head: true }).neq('status', 'offline');
+    if (error) {
+        console.error('❌ Failed to count logged-in agents:', error.message);
+        return -1;
+    }
+    return count ?? 0;
+}
+
 // Same fail-safe shape as getBusinessHours — if the table isn't there yet
 // (migration not applied) or the query errors, fall back to Asterisk's
 // always-present 'default' class rather than risk startMoh() failing with a
@@ -460,6 +475,7 @@ module.exports = {
     getAgentSipCredentials,
     getNoAgentsForwardingDestination,
     getBusinessHours,
+    getLoggedInAgentCount,
     getHoldMusicConfig,
     claimAddPartyRequests,
     setAddPartyStatus,

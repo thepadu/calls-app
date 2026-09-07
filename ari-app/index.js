@@ -47,6 +47,7 @@ const {
     getAgentSipCredentials,
     getNoAgentsForwardingDestination,
     getBusinessHours,
+    getLoggedInAgentCount,
     getHoldMusicConfig,
     claimAddPartyRequests,
     setAddPartyStatus,
@@ -147,6 +148,16 @@ const GHOST_AGENT_POLL_MS = 30000;
 const GHOST_FLAP_WINDOW_MS = 60 * 60 * 1000;
 const GHOST_FLAP_THRESHOLD = 3;
 const ghostReconcileTimestamps = new Map();
+// A different class of problem from every other alert in this file: not a
+// technical failure, but nobody having logged into the dashboard at all
+// during a period customers expect to be able to reach someone. 10 minutes
+// tolerates a normal end-of-shift/start-of-shift gap without paging anyone
+// for it; NO_AGENTS_POLL_MS just needs to be frequent enough to notice
+// within that window, not tied to any other interval's cadence.
+const NO_AGENTS_ALERT_THRESHOLD_MS = 10 * 60 * 1000;
+const NO_AGENTS_POLL_MS = 60 * 1000;
+let noAgentsSince = null;
+let noAgentsAlerted = false;
 // A ring failure ("Allocation failed" from PJSIP — no active registration to
 // route to) most often means this agent's SIP session has already died even
 // though their heartbeat/DB status hasn't caught up yet (reconcileGhostAgents
@@ -206,6 +217,32 @@ function safeEqual(a, b) {
     return bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
 }
 
+// Every /internal/* route had this exact 4-line block copy-pasted, and a
+// failure was previously completely silent — no log line anywhere, on
+// either side, which meant the one moment ARI_APP_INTERNAL_SECRET drifting
+// out of sync between this process and calls-app (the exact failure mode
+// the 2026-09-07 TURN-password bug turned out to be, just for a different
+// credential) would ever actually manifest, nobody would have anything to
+// go on beyond a vague "the claim/hold-music button doesn't work" report.
+// Logs every rejection (this endpoint is reachable from the public
+// internet via Caddy, so most of these will just be background bot
+// scanning with no header at all), but only alerts when a header WAS sent
+// and was simply wrong — calls-app always sends one on every real request,
+// so that specific shape is the one worth someone's attention; a bare
+// scanner probe with no header isn't.
+function rejectUnlessAuthorized(req, res) {
+    const provided = req.headers['x-chumz-internal-secret'];
+    if (INTERNAL_SECRET && safeEqual(provided, INTERNAL_SECRET)) return false;
+
+    console.warn(`⚠️ Rejected unauthorized request to ${req.url} (secret ${provided ? 'present but wrong' : 'missing'})`);
+    if (provided) {
+        alertGChat(`⚠️ ${req.url} rejected a request with a present-but-wrong internal secret — check ARI_APP_INTERNAL_SECRET still matches between ari-app and calls-app.`);
+    }
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Unauthorized' }));
+    return true;
+}
+
 function readJsonBody(req, maxBytes = 4096) {
     return new Promise((resolve, reject) => {
         let size = 0;
@@ -252,11 +289,7 @@ http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && req.url === '/internal/provision-agent') {
-        if (!INTERNAL_SECRET || !safeEqual(req.headers['x-chumz-internal-secret'], INTERNAL_SECRET)) {
-            res.writeHead(401, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Unauthorized' }));
-            return;
-        }
+        if (rejectUnlessAuthorized(req, res)) return;
 
         let body;
         try {
@@ -303,11 +336,7 @@ http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && req.url === '/internal/deprovision-agent') {
-        if (!INTERNAL_SECRET || !safeEqual(req.headers['x-chumz-internal-secret'], INTERNAL_SECRET)) {
-            res.writeHead(401, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Unauthorized' }));
-            return;
-        }
+        if (rejectUnlessAuthorized(req, res)) return;
 
         let body;
         try {
@@ -338,11 +367,7 @@ http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && req.url === '/internal/hangup-call') {
-        if (!INTERNAL_SECRET || !safeEqual(req.headers['x-chumz-internal-secret'], INTERNAL_SECRET)) {
-            res.writeHead(401, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Unauthorized' }));
-            return;
-        }
+        if (rejectUnlessAuthorized(req, res)) return;
 
         let body;
         try {
@@ -404,11 +429,7 @@ http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && req.url === '/internal/claim-call') {
-        if (!INTERNAL_SECRET || !safeEqual(req.headers['x-chumz-internal-secret'], INTERNAL_SECRET)) {
-            res.writeHead(401, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Unauthorized' }));
-            return;
-        }
+        if (rejectUnlessAuthorized(req, res)) return;
 
         let body;
         try {
@@ -448,11 +469,7 @@ http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && req.url === '/internal/set-hold-music') {
-        if (!INTERNAL_SECRET || !safeEqual(req.headers['x-chumz-internal-secret'], INTERNAL_SECRET)) {
-            res.writeHead(401, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Unauthorized' }));
-            return;
-        }
+        if (rejectUnlessAuthorized(req, res)) return;
 
         let body;
         try {
@@ -518,6 +535,39 @@ function isWithinBusinessHours(hours) {
     const closeMinutes = closeH * 60 + closeM;
 
     return minutesNow >= openMinutes && minutesNow < closeMinutes;
+}
+
+// Business hours not enabled at all means this was never meant to enforce
+// anything — same fail-open reasoning as isWithinBusinessHours' own
+// call sites, so this stays silent rather than alerting on a config that
+// was deliberately never turned on. Edge-triggered like the VPS-side
+// health/TURN checks (see chumz-healthcheck.sh) for the same reason: a
+// naive re-alert every NO_AGENTS_POLL_MS while this stays true would bury
+// the first, actually-useful alert in repeats.
+async function checkNoAgentsDuringBusinessHours() {
+    const hours = await getBusinessHours();
+    if (!hours.enabled || !isWithinBusinessHours(hours)) {
+        noAgentsSince = null;
+        noAgentsAlerted = false;
+        return;
+    }
+
+    const count = await getLoggedInAgentCount();
+    if (count < 0) return; // query failed — getLoggedInAgentCount already logged why
+
+    if (count === 0) {
+        if (noAgentsSince === null) noAgentsSince = Date.now();
+        if (!noAgentsAlerted && Date.now() - noAgentsSince >= NO_AGENTS_ALERT_THRESHOLD_MS) {
+            noAgentsAlerted = true;
+            alertGChat(
+                `🔴 No agents have been logged in for ${Math.round(NO_AGENTS_ALERT_THRESHOLD_MS / 60000)}+ minutes during business hours — inbound callers have nobody to reach.`
+            );
+        }
+    } else {
+        if (noAgentsAlerted) alertGChat('✅ At least one agent is logged in again.');
+        noAgentsSince = null;
+        noAgentsAlerted = false;
+    }
 }
 
 // A load test proved this apparently-rare failure isn't actually rare under
@@ -1951,6 +2001,11 @@ async function main() {
                 })
                 .catch(err => console.error('❌ On-call reconciliation poll error:', err.message)),
         GHOST_AGENT_POLL_MS
+    );
+
+    setInterval(
+        () => checkNoAgentsDuringBusinessHours().catch(err => console.error('❌ No-agents check error:', err.message)),
+        NO_AGENTS_POLL_MS
     );
 
     console.log(`✅ ARI app "${APP_NAME}" connected to ${ARI_URL} and listening`);

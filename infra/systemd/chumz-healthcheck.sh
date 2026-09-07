@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Checks the two things this codebase has actually been bitten by with no
+# Checks the things this codebase has actually been bitten by with no
 # warning: ari-app losing its ARI connection (the week-long inbound outage
-# /healthz's ariConnected field exists to catch — see index.js) and the TURN
+# /healthz's ariConnected field exists to catch — see index.js), the TURN
 # relay credentials silently drifting out of sync with coturn (the
-# 2026-09-07 one-way-audio bug, see DECISIONS.md). Both were only ever
+# 2026-09-07 one-way-audio bug, see DECISIONS.md), and calls-app itself
+# going down on DigitalOcean — which had genuinely nothing watching it at
+# all before this, technical or otherwise. Every one of these was only ever
 # found by manually going and looking after someone reported a symptom;
 # this is what turns that into a page instead.
 #
@@ -92,3 +94,17 @@ fi
 report "turn" "$turn_ok" \
     "coturn: TURN relay allocation test failed — agents on networks that need the relay may get one-way or no audio. Check /etc/asterisk/rtp.conf's turnpassword against /etc/turnserver.conf's user= line" \
     "coturn: TURN relay allocation test is passing again"
+
+# --- Check 3: calls-app's own /healthz on DigitalOcean ---------------------
+# Run from the VPS, not from DO itself, deliberately — checking a service
+# from inside the same platform it runs on can miss a whole class of outage
+# (DNS, DO's edge, the box's own egress) that only shows up from the
+# outside, which is the only vantage point a real caller/agent ever has.
+CALLS_APP_URL="${CALLS_APP_HEALTHZ_URL:-https://calls-app-v6a38.ondigitalocean.app/healthz}"
+callsapp_ok=false
+if http_code=$(curl -s -m 10 -o /dev/null -w '%{http_code}' "$CALLS_APP_URL" 2>/dev/null) && [ "$http_code" = "200" ]; then
+    callsapp_ok=true
+fi
+report "callsapp" "$callsapp_ok" \
+    "calls-app: $CALLS_APP_URL is down or not returning 200 — the dashboard/API may be unreachable. Check: doctl apps list-deployments, doctl apps logs" \
+    "calls-app: $CALLS_APP_URL is back to 200"
