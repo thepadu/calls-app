@@ -5,12 +5,16 @@
   "description": "Real-time call-control app for the self-hosted Asterisk box (sip.chumz.online). Runs on the Asterisk VPS itself, not DigitalOcean App Platform (where the main dashboard app runs) — connects to ARI over localhost and to Supabase over HTTPS for the same agents/ivr_config/call_logs data the main app uses.",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "vitest run"
   },
   "dependencies": {
-    "ari-client": "^2.2.0",
     "@supabase/supabase-js": "^2.45.4",
+    "ari-client": "^2.2.0",
     "dotenv": "^16.4.5",
     "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "vitest": "^5.0.0"
   }
 }
