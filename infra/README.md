@@ -14,12 +14,17 @@ This directory is a **mirror** of the system-level config that runs the Asterisk
 | `systemd/chumz-safe-restart.service` | `/etc/systemd/system/chumz-safe-restart.service` |
 | `systemd/chumz-safe-restart.timer` | `/etc/systemd/system/chumz-safe-restart.timer` |
 | `systemd/chumz-ari-app.service` | `/etc/systemd/system/chumz-ari-app.service` |
+| `systemd/chumz-healthcheck.sh` | `/usr/local/sbin/chumz-healthcheck.sh` |
+| `systemd/chumz-healthcheck.service` | `/etc/systemd/system/chumz-healthcheck.service` |
+| `systemd/chumz-healthcheck.timer` | `/etc/systemd/system/chumz-healthcheck.timer` |
 | `needrestart/chumz.conf` | `/etc/needrestart/conf.d/chumz.conf` |
 | `firewall/setup-ufw.sh` | reconstructs the live `ufw` ruleset (not a file mirror — `ufw` doesn't have one editable source file) |
 
 **Deliberately excluded: `/etc/asterisk/pjsip.conf`.** It holds every agent's live SIP password in plaintext. It's already managed as code, just not as a flat file — the marker-comment-based provisioning system that writes/removes agent blocks lives in `ari-app/pjsipConfig.js`, which *is* tracked. The live file itself should never enter git history, on this repo or any other.
 
 **Also excluded, same reason: `/etc/asterisk/rtp.conf`.** Its `turnpassword` line is a live plaintext credential (the TURN relay used for WebRTC ICE, see `DECISIONS.md`'s 2026-09-07 entry) — not tracked here for the same reason `pjsip.conf` isn't.
+
+**`chumz-healthcheck.sh` needs `/etc/chumz-healthcheck.env`, which also isn't tracked here** — it holds the Google Chat webhook URL and the same TURN test credentials as `rtp.conf`, one `KEY=value` per line: `GCHAT_WEBHOOK_URL`, `TURN_ADDR`, `TURN_USERNAME`, `TURN_PASSWORD`. Must exist (root-only, e.g. `chmod 600`) before the timer runs, or the script exits immediately and logs why via `logger`.
 
 `asterisk.service` isn't here either — it's the unmodified package-provided unit at `/usr/lib/systemd/system/asterisk.service`, not a local override.
 

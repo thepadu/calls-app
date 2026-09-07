@@ -1,0 +1,8 @@
+# /etc/systemd/system/chumz-healthcheck.service
+[Unit]
+Description=Chumz: check ARI connectivity and TURN relay credentials, alert to Google Chat on change
+ConditionPathExists=/usr/local/sbin/chumz-healthcheck.sh
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/chumz-healthcheck.sh
