@@ -80,6 +80,24 @@ function errText(err) {
     return String(err);
 }
 
+// Everything this alerts on (see call sites) already had a console.log/warn
+// line before this existed — the actual gap was that nobody was watching
+// stdout. Deliberately fire-and-forget: an alerting failure (webhook down,
+// no network) must never be allowed to affect real call handling, so this
+// only ever logs its own failure, never throws. GCHAT_WEBHOOK_URL unset
+// (e.g. any environment other than the production VPS) silently no-ops
+// rather than erroring — alerting is optional infrastructure, not a
+// dependency this process should refuse to run without.
+const GCHAT_WEBHOOK_URL = process.env.GCHAT_WEBHOOK_URL;
+function alertGChat(text) {
+    if (!GCHAT_WEBHOOK_URL) return;
+    fetch(GCHAT_WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text })
+    }).catch(err => console.error('⚠️ Failed to post Google Chat alert:', err.message));
+}
+
 const ARI_URL = process.env.ARI_URL || 'http://127.0.0.1:8088';
 const ARI_USERNAME = process.env.ARI_USERNAME;
 const ARI_PASSWORD = process.env.ARI_PASSWORD;
@@ -807,6 +825,7 @@ async function ringOneAgent(agent, waiting, ringGroup, customerNumber) {
             console.warn(
                 `⚠️ Agent ${agent.id} failed to ring ${failures} times in a row — flipping offline instead of retrying again next tick`
             );
+            alertGChat(`⚠️ Agent ${agent.id} failed to ring ${failures} times in a row for a real waiting caller — flipped offline.`);
             ringFailureCounts.delete(agent.id);
             await setAgentStatus(agent.id, 'offline');
         } else {
@@ -1789,7 +1808,14 @@ async function main() {
         () =>
             sweepStaleCalls(STALE_CALL_PREBRIDGE_MAX_AGE_MS, STALE_CALL_ONGOING_MAX_AGE_MS)
                 .then(swept => {
-                    if (swept.length > 0) console.log(`🧹 Swept ${swept.length} stale call_logs row(s)`);
+                    if (swept.length === 0) return;
+                    console.log(`🧹 Swept ${swept.length} stale call_logs row(s)`);
+                    // Unlike ghost-agent reconciliation (routine — a tab closing
+                    // is normal), a genuinely orphaned call_logs row is never
+                    // expected in healthy operation — worth a look every time,
+                    // same reasoning as the TURN-password bug this would have
+                    // surfaced days earlier had it been wired up sooner.
+                    alertGChat(`🧹 Swept ${swept.length} stale call_logs row(s) — a call got orphaned somewhere. Check chumz-ari-app.log around the affected session id(s).`);
                 })
                 .catch(err => console.error('❌ Stale-call sweep poll error:', err.message)),
         STALE_CALL_SWEEP_MS
@@ -1798,7 +1824,9 @@ async function main() {
         () =>
             sweepStaleAddPartyRequests(ADD_PARTY_STALE_MAX_AGE_MS)
                 .then(swept => {
-                    if (swept.length > 0) console.log(`🧹 Swept ${swept.length} stale add-party request(s)`);
+                    if (swept.length === 0) return;
+                    console.log(`🧹 Swept ${swept.length} stale add-party request(s)`);
+                    alertGChat(`🧹 Swept ${swept.length} stale add-party request(s) — a "Adding party…" request got orphaned. See sweepStaleAddPartyRequests in ari-app/supabase.js.`);
                 })
                 .catch(err => console.error('❌ Stale add-party sweep poll error:', err.message)),
         STALE_CALL_SWEEP_MS
@@ -1900,6 +1928,7 @@ async function main() {
                             console.warn(
                                 `⚠️ Agent ${agentId}'s softphone connection has dropped ${recent.length} times in the last hour — likely an unstable connection, not a one-off`
                             );
+                            alertGChat(`⚠️ Agent ${agentId}'s softphone has dropped ${recent.length} times in the last hour — likely an unstable connection.`);
                         }
                     }
                 })
@@ -1916,8 +1945,9 @@ async function main() {
         () =>
             reconcileGhostOnCallAgents()
                 .then(stuck => {
-                    if (stuck.length > 0)
-                        console.log(`🧹 Reconciled ${stuck.length} agent(s) stuck on-call with no matching live channel`);
+                    if (stuck.length === 0) return;
+                    console.log(`🧹 Reconciled ${stuck.length} agent(s) stuck on-call with no matching live channel`);
+                    alertGChat(`🧹 ${stuck.length} agent(s) were stuck 'on_call' with no matching live Asterisk channel — flipped back to available. A call may have ended without cleaning up properly.`);
                 })
                 .catch(err => console.error('❌ On-call reconciliation poll error:', err.message)),
         GHOST_AGENT_POLL_MS
