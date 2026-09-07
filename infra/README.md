@@ -19,6 +19,8 @@ This directory is a **mirror** of the system-level config that runs the Asterisk
 
 **Deliberately excluded: `/etc/asterisk/pjsip.conf`.** It holds every agent's live SIP password in plaintext. It's already managed as code, just not as a flat file — the marker-comment-based provisioning system that writes/removes agent blocks lives in `ari-app/pjsipConfig.js`, which *is* tracked. The live file itself should never enter git history, on this repo or any other.
 
+**Also excluded, same reason: `/etc/asterisk/rtp.conf`.** Its `turnpassword` line is a live plaintext credential (the TURN relay used for WebRTC ICE, see `DECISIONS.md`'s 2026-09-07 entry) — not tracked here for the same reason `pjsip.conf` isn't.
+
 `asterisk.service` isn't here either — it's the unmodified package-provided unit at `/usr/lib/systemd/system/asterisk.service`, not a local override.
 
 ## Why this setup, not full automation
