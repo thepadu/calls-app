@@ -50,4 +50,4 @@ git commit -m "..."
 
 ## Known items flagged, not yet acted on
 
-- `ufw` still allows `5061/tcp` (see `firewall/setup-ufw.sh`) with nothing listening on it — likely a leftover from a removed/never-implemented SIP-TLS transport. Confirm intent before removing.
+_None currently open._

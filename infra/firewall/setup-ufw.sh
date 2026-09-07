@@ -31,8 +31,3 @@ ufw allow 49152:49999/udp comment 'coturn relay range'
 
 # RTP media range for direct (non-relayed) call audio.
 ufw allow 10000:20000/udp comment 'RTP media'
-
-# Flagged, not yet removed — see infra/README.md's "Known items" section.
-# Nothing is listening on 5061 (checked live via `ss -tlnp`), likely a
-# leftover from a removed/never-implemented SIP-TLS transport.
-ufw allow 5061/tcp comment 'UNUSED? no listener bound as of 2026-08-31 - confirm before removing'
