@@ -17,6 +17,7 @@ This directory is a **mirror** of the system-level config that runs the Asterisk
 | `systemd/chumz-healthcheck.sh` | `/usr/local/sbin/chumz-healthcheck.sh` |
 | `systemd/chumz-healthcheck.service` | `/etc/systemd/system/chumz-healthcheck.service` |
 | `systemd/chumz-healthcheck.timer` | `/etc/systemd/system/chumz-healthcheck.timer` |
+| `systemd/chumz-ari-rollback.sh` | `/usr/local/sbin/chumz-ari-rollback.sh` |
 | `needrestart/chumz.conf` | `/etc/needrestart/conf.d/chumz.conf` |
 | `firewall/setup-ufw.sh` | reconstructs the live `ufw` ruleset (not a file mirror — `ufw` doesn't have one editable source file) |
 
