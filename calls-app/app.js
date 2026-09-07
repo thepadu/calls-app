@@ -1,5 +1,4 @@
 const express = require('express');
-const bodyParser = require('body-parser');
 const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
@@ -8,17 +7,15 @@ const { createClient } = require('@supabase/supabase-js');
 const authRoutes = require('./auth');
 const apiRoutes = require('./api');
 
-// Express 4 does not route a rejected promise from an async route handler
-// to any error middleware — it just becomes an "unhandled rejection" at the
-// Node process level, which (Node 15+) terminates the process by default.
-// Almost none of the routes below wrap their async body in try/catch (they
-// mostly rely on Supabase returning `{error}` rather than throwing), so
-// without this, a single unexpected error from any request — a library
-// behaving differently than expected, a malformed payload reaching code
-// that doesn't guard for it — would crash the server for every connected
-// user, not just the one request. Logging and continuing turns that into a
-// contained per-request failure instead. Registered before anything else
-// so it's active for the entire process lifetime, including module init.
+// Express 5 (unlike 4) auto-forwards a rejected promise from an async route
+// handler to the error middleware below — that's now the normal path for
+// the ~50 routes in api.js that don't wrap their body in try/catch (they
+// mostly rely on Supabase returning `{error}` rather than throwing). This
+// handler is a backstop for the rest: a rejection from anywhere Express
+// never touches at all — a setInterval callback, an event listener, module
+// init — which would otherwise still just crash the process (Node 15+
+// terminates on an unhandled rejection by default). Registered before
+// anything else so it's active for the entire process lifetime.
 process.on('unhandledRejection', reason => {
     console.error('❌ Unhandled promise rejection:', reason);
 });
@@ -43,8 +40,8 @@ const app = express();
 // `1` means "trust exactly one hop" — matches DO App Platform's setup.
 app.set('trust proxy', 1);
 
-app.use(bodyParser.urlencoded({ extended: false }));
-app.use(bodyParser.json());
+app.use(express.urlencoded({ extended: false }));
+app.use(express.json());
 app.use(cookieParser());
 
 const supabase = createClient(
@@ -147,10 +144,23 @@ app.post('/events', webhookLimiter, verifyAtWebhookSecret, (req, res) => {
 // 🔹 REACT WEB APP (built via `npm run build` in /web, served under /app)
 const webBuildPath = path.join(__dirname, '..', 'web', 'dist');
 app.use('/app', express.static(webBuildPath));
-app.get(['/app', '/app/*'], (req, res) => {
+app.get(['/app', '/app/*splat'], (req, res) => {
     res.sendFile(path.join(webBuildPath, 'index.html'), err => {
         if (err) res.status(404).send('Web app not built — run `npm run build` in /web first.');
     });
+});
+
+// Express 5 auto-forwards a rejected promise from any async route handler
+// above to here instead of leaving the request hanging forever (Express 4's
+// behavior — see the unhandledRejection comment up top). Must be registered
+// after every other app.use/route — Express only routes an error to
+// middleware defined AFTER the route that threw it. Matches every other
+// route's own error response shape ({ error: '...' }) rather than Express's
+// default HTML/stack-trace page.
+app.use((err, req, res, next) => {
+    console.error(`❌ Unhandled error in ${req.method} ${req.path}:`, err);
+    if (res.headersSent) return next(err);
+    res.status(500).json({ error: 'Something went wrong' });
 });
 
 // Start server

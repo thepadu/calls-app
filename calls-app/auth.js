@@ -13,11 +13,11 @@ const SESSION_REFRESH_AFTER_MS = 60 * 60 * 1000;
 
 module.exports = function (app, supabase) {
 
-    const client = new OAuth2Client(
-        process.env.GOOGLE_CLIENT_ID,
-        process.env.GOOGLE_CLIENT_SECRET,
-        process.env.GOOGLE_CALLBACK_URL?.trim()
-    );
+    const client = new OAuth2Client({
+        clientId: process.env.GOOGLE_CLIENT_ID,
+        clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+        redirectUri: process.env.GOOGLE_CALLBACK_URL?.trim()
+    });
 
     // Shared by the initial login and every sliding-session refresh in
     // requireAuth below, so the token shape and cookie settings can't drift
