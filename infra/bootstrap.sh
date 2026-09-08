@@ -37,6 +37,14 @@ apt-get install -y \
     git curl ca-certificates gnupg \
     debian-keyring debian-archive-keyring apt-transport-https
 
+# Kenya is a single timezone with no DST (EAT, UTC+3) — set it here so
+# `date`/log-file mtimes/anything a human reads on the box directly reads in
+# local time. Doesn't affect any application logic: ari-app's own business-
+# hours check (ari-app/lib/helpers.js's isWithinBusinessHours) computes
+# Nairobi time from UTC explicitly and ignores the system TZ entirely, and
+# its own log timestamps use toISOString() (always UTC) for the same reason.
+timedatectl set-timezone Africa/Nairobi
+
 echo "== 2/8: Node.js 20.x (NodeSource's own repo — Ubuntu 24.04's default apt Node is older) =="
 if ! command -v node >/dev/null || [[ "$(node -v)" != v20.* ]]; then
     mkdir -p /usr/share/keyrings
