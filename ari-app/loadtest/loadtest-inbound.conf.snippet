@@ -1,0 +1,15 @@
+; Append this to /etc/asterisk/extensions.conf on the VPS, then
+; `asterisk -rx "dialplan reload"`, to re-run
+; asterisk-channel-load-test.js in the future. TEMPORARY — back up
+; extensions.conf first, remove this block and reload again once done,
+; and diff the file back to its exact pre-test backup. See DECISIONS.md's
+; 2026-09-08 entry and asterisk-channel-load-test.js's own header comment
+; for the full reasoning.
+
+[loadtest-inbound]
+; Mirrors [from-at-trunk] exactly (same Stasis(chumz-ivr) entry point, no
+; args) so a locally-originated Local channel landing here is processed by
+; the real, unmodified ari-app code exactly like a real inbound call.
+exten => _X.,1,NoOp(Load-test channel entering Stasis, from ${CALLERID(num)})
+exten => _X.,n,Stasis(chumz-ivr)
+exten => _X.,n,Hangup()
