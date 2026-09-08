@@ -6,7 +6,8 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "vitest run"
+    "test": "vitest run",
+    "loadtest:queue": "node loadtest/queue-simulation.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",

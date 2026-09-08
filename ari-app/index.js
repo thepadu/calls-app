@@ -1952,7 +1952,38 @@ async function main() {
     console.log(`✅ ARI app "${APP_NAME}" connected to ${ARI_URL} and listening`);
 }
 
-main().catch(err => {
-    console.error('❌ Fatal error starting ARI app:', err);
-    process.exit(1);
-});
+// `require.main === module` is the standard, zero-behavior-change way to
+// tell "run directly" (`node index.js`, exactly what happens in production —
+// this stays true) apart from "required by something else" (a test/
+// simulation script pulling in the real queue functions below without
+// wanting a live Asterisk connection or an HTTP server bound to a port).
+if (require.main === module) {
+    main().catch(err => {
+        console.error('❌ Fatal error starting ARI app:', err);
+        process.exit(1);
+    });
+}
+
+// Exists only so ari-app/loadtest/queue-simulation.js can drive the real
+// queue/ring/bridge functions above against a fake ari-client instead of a
+// live Asterisk connection — never imported by production code (main()
+// only ever sets `client` itself, via the real ari.connect()). Exporting
+// the module-level state too (not just the functions) lets the simulation
+// reset/inspect waitingQueue/ringGroupBySessionId/claimedSessions between
+// runs without needing its own copy that could quietly drift from the real
+// thing.
+module.exports = {
+    __setTestClient: c => {
+        client = c;
+    },
+    enterQueue,
+    tryDequeueNext,
+    dequeueNext,
+    ringOneAgent,
+    claimQueuedCall,
+    bridgeAgentLeg,
+    waitingQueue,
+    ringGroupBySessionId,
+    claimedSessions,
+    agentLegBySessionId
+};
