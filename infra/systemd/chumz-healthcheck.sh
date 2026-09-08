@@ -18,10 +18,14 @@ set -euo pipefail
 
 LOG_TAG="chumz-healthcheck"
 STATE_DIR="/var/lib/chumz-healthcheck"
-# Webhook URL and TURN test credentials are live secrets — kept in a
-# root-only env file, never in this tracked script, same reasoning as why
-# pjsip.conf/rtp.conf's own credentials never enter git (see infra/README.md).
-ENV_FILE="/etc/chumz-healthcheck.env"
+# Webhook URL and TURN test credentials are live secrets — read from the
+# same canonical, root/asterisk-only secrets file ari-app itself uses (as of
+# 2026-09-08 — see DECISIONS.md), never hardcoded in this tracked script,
+# same reasoning as why pjsip.conf/rtp.conf's own credentials never enter
+# git (see infra/README.md). Used to be a separate /etc/chumz-healthcheck.env
+# with its own hand-typed copies of these same values — retired in favor of
+# one file so there's one place to update, not two that can drift apart.
+ENV_FILE="/opt/chumz-ari-app/.env"
 
 log() { logger -t "$LOG_TAG" "$1"; echo "$1"; }
 

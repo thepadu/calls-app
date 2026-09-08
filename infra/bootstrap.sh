@@ -83,6 +83,7 @@ done
 install -m 755 "$INFRA/systemd/chumz-safe-restart.sh" /usr/local/sbin/chumz-safe-restart.sh
 install -m 755 "$INFRA/systemd/chumz-healthcheck.sh" /usr/local/sbin/chumz-healthcheck.sh
 install -m 755 "$INFRA/systemd/chumz-ari-rollback.sh" /usr/local/sbin/chumz-ari-rollback.sh
+install -m 755 "$INFRA/systemd/chumz-sync-turn-secret.sh" /usr/local/sbin/chumz-sync-turn-secret.sh
 
 echo "== 6/8: firewall =="
 bash "$INFRA/firewall/setup-ufw.sh"
@@ -106,27 +107,30 @@ cat <<'EOF'
    restored from anywhere, by design (see infra/README.md).
 
 2. rtp.conf — recreate by hand using DECISIONS.md's 2026-09-07 TURN entry
-   for the exact shape; the turnpassword value must match whatever's set
-   in step 3 below, exactly.
+   for the exact shape (turnaddr/turnusername/turnpassword lines must
+   exist). The actual values don't need to be typed correctly here — step 4
+   below overwrites them from the one canonical value in .env, so a typo
+   here can't cause the rtp.conf-vs-coturn drift that bit us on 2026-09-07.
 
 3. turnserver.conf (coturn) — recreate by hand (realm sip.chumz.online,
    external-ip = this box's public IP, lt-cred-mech, a fresh
-   user=chumzagent:<password> line). Whatever password you choose here is
-   the one that must also go in rtp.conf (step 2) and calls-app's
-   SOFTPHONE_TURN_PASSWORD env var on DigitalOcean — three copies, one
-   value, see DECISIONS.md's 2026-09-07 TURN-password entry for exactly why
-   that's worth double-checking rather than assuming.
+   user=chumzagent:<password> line).
 
-4. /opt/chumz-ari-app/.env — SUPABASE_URL, SUPABASE_KEY, ARI_URL,
-   ARI_USERNAME, ARI_PASSWORD, ARI_APP_NAME, ARI_APP_INTERNAL_SECRET,
-   GCHAT_WEBHOOK_URL. Real values live only in the original box's backups
-   and whoever's password manager holds them — never in this repo.
-
-5. /etc/chumz-healthcheck.env — GCHAT_WEBHOOK_URL (quote it — see
+4. /opt/chumz-ari-app/.env — the single canonical secrets file for the
+   whole VPS (see DECISIONS.md's 2026-09-08 entry and infra/README.md):
+   SUPABASE_URL, SUPABASE_KEY, ARI_URL, ARI_USERNAME, ARI_PASSWORD,
+   ARI_APP_NAME, ARI_APP_INTERNAL_SECRET, GCHAT_WEBHOOK_URL (quote it — see
    infra/README.md's note on the literal & in Google Chat webhook URLs),
-   TURN_ADDR/TURN_USERNAME/TURN_PASSWORD (same values as step 3).
+   and TURN_ADDR/TURN_USERNAME/TURN_PASSWORD (same password chosen in step
+   3). `chmod 600` it. Real values live only in the original box's backups
+   and whoever's password manager holds them — never in this repo. Then run
+   `chumz-sync-turn-secret.sh` to push the TURN_* values into rtp.conf
+   (step 2) and turnserver.conf (step 3) instead of hand-typing them there
+   too. Whatever password you choose still also needs to go in calls-app's
+   SOFTPHONE_TURN_PASSWORD env var on DigitalOcean by hand — that's the one
+   copy this script can't reach, since ari-app runs on this VPS, not on DO.
 
-6. Piper TTS — NOT installed by this script. The live box has a
+5. Piper TTS — NOT installed by this script. The live box has a
    manually-downloaded release at /opt/piper/piper/piper plus a voice model
    at /opt/piper/voices/en_US-lessac-medium.onnx (+ .onnx.json) — from
    Piper's own GitHub releases and the rhasspy/piper-voices model repo, but
@@ -136,7 +140,7 @@ cat <<'EOF'
    for the current linux_x86_64 release and the voice model download
    instead of trusting an old URL.
 
-7. Reload/restart order once secrets are in place: `asterisk -rx
+6. Reload/restart order once secrets are in place: `asterisk -rx
    "core reload"`, `systemctl restart coturn`, `systemctl start
    chumz-ari-app`, then confirm with chumz-healthcheck.sh's own checks
    (or just `systemctl start chumz-healthcheck.service` once).
