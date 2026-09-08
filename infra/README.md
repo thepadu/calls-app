@@ -2,6 +2,10 @@
 
 This directory is a **mirror** of the system-level config that runs the Asterisk VPS — Caddy, Asterisk's own `http.conf`/`extensions.conf`, and the systemd units/scripts that keep everything alive safely. None of it deploys automatically; it exists so the config that actually runs production has history, review, and a recovery reference, instead of living only as `.bak-<timestamp>` files on the box itself.
 
+## Rebuilding the box from scratch
+
+`bootstrap.sh` provisions a fresh Ubuntu 24.04 droplet into a working copy of this VPS — every package (with exactly where each one actually comes from — Node and Caddy aren't in Ubuntu's own apt repos), every tracked config file below copied into place, `ari-app` deployed and installed. Written 2026-09-08 by reading the live box directly (`dpkg -l`, `node -v`, etc.), not from memory — writing it is also what surfaced two real gaps this table had never covered (`fail2ban/jail.local`, `asterisk/logger.conf` — see below). It ends with a clearly-labeled list of manual steps for the things that genuinely can't be automated (live credentials, an unpinned Piper TTS download) — read those before assuming a run of this script alone means the box is done.
+
 ## What's here, and where it really lives
 
 | Repo path | Live path on the VPS |
@@ -10,6 +14,10 @@ This directory is a **mirror** of the system-level config that runs the Asterisk
 | `asterisk/http.conf` | `/etc/asterisk/http.conf` |
 | `asterisk/extensions.conf` | `/etc/asterisk/extensions.conf` |
 | `asterisk/musiconhold.conf` | `/etc/asterisk/musiconhold.conf` |
+| `asterisk/logger.conf` | `/etc/asterisk/logger.conf` |
+| `asterisk/pjsip.conf.template` | **not a live-file mirror** — the credential-free skeleton (transports + the Africa's Talking trunk) of `/etc/asterisk/pjsip.conf`; see below |
+| `fail2ban/jail.local` | `/etc/fail2ban/jail.local` |
+| `fail2ban/asterisk-tls-scan.conf` | `/etc/fail2ban/filter.d/asterisk-tls-scan.conf` |
 | `systemd/chumz-safe-restart.sh` | `/usr/local/sbin/chumz-safe-restart.sh` |
 | `systemd/chumz-safe-restart.service` | `/etc/systemd/system/chumz-safe-restart.service` |
 | `systemd/chumz-safe-restart.timer` | `/etc/systemd/system/chumz-safe-restart.timer` |
@@ -24,6 +32,10 @@ This directory is a **mirror** of the system-level config that runs the Asterisk
 **Deliberately excluded: `/etc/asterisk/pjsip.conf`.** It holds every agent's live SIP password in plaintext. It's already managed as code, just not as a flat file — the marker-comment-based provisioning system that writes/removes agent blocks lives in `ari-app/pjsipConfig.js`, which *is* tracked. The live file itself should never enter git history, on this repo or any other.
 
 **Also excluded, same reason: `/etc/asterisk/rtp.conf`.** Its `turnpassword` line is a live plaintext credential (the TURN relay used for WebRTC ICE, see `DECISIONS.md`'s 2026-09-07 entry) — not tracked here for the same reason `pjsip.conf` isn't.
+
+**Also excluded, same reason: `/etc/turnserver.conf`.** coturn's own copy of the same TURN credential (`user=chumzagent:...`), checked when auditing `rtp.conf` — never actually added to this exclusion list at the time, doing so now.
+
+**`pjsip.conf.template` is deliberately not a 1:1 mirror of the live file** (unlike everything else in this table) — the live file mixes the credential-free transport/trunk sections with every agent's real SIP password, so a straight mirror would leak credentials the same way tracking the raw file would. The template has just the credential-free parts; real agent blocks come back via `ari-app/pjsipConfig.js`'s normal provisioning flow after a rebuild, not from a file.
 
 **`chumz-healthcheck.sh` needs `/etc/chumz-healthcheck.env`, which also isn't tracked here** — it holds the Google Chat webhook URL and the same TURN test credentials as `rtp.conf`, one `KEY=value` per line: `GCHAT_WEBHOOK_URL`, `TURN_ADDR`, `TURN_USERNAME`, `TURN_PASSWORD`. Must exist (root-only, e.g. `chmod 600`) before the timer runs, or the script exits immediately and logs why via `logger`. **Quote the webhook URL's value** (`GCHAT_WEBHOOK_URL="https://...&token=..."`) — the script `source`s this file, and Google Chat's webhook URLs contain an unquoted `&` that bash otherwise parses as "background everything after this," silently dropping the rest of the value (hit this live on first setup, 2026-09-07). Optionally also set `CALLS_APP_HEALTHZ_URL` there if `calls-app`'s DO URL ever changes (e.g. a custom domain gets added) — defaults to the current `https://calls-app-v6a38.ondigitalocean.app/healthz` if unset.
 
@@ -51,4 +63,4 @@ git commit -m "..."
 
 ## Known items flagged, not yet acted on
 
-_None currently open._
+- **Piper TTS has no scriptable, verified install step.** The live box has a manually-downloaded release at `/opt/piper/piper/piper` plus a voice model at `/opt/piper/voices/en_US-lessac-medium.onnx` (+ `.onnx.json`) — from Piper's own GitHub releases and the `rhasspy/piper-voices` model repo, but the exact release URL originally used was never re-verified as still-current while writing `bootstrap.sh`, so it's flagged there as a manual step rather than hardcoded as a fact that might already be stale. Worth pinning down for real if this ever needs to be rebuilt for real.

@@ -1,0 +1,58 @@
+; Structural skeleton of the live /etc/asterisk/pjsip.conf — the parts with
+; no credentials in them at all. NOT the live file itself (see
+; infra/README.md's "deliberately excluded" section for why) — this exists
+; because a rebuild needs these transport/trunk sections from *somewhere*,
+; and until now nothing tracked them at all, credential-free or not.
+;
+; What's NOT here, deliberately:
+;   - Per-agent [<sip_username>]/[<sip_username>-auth] blocks: these are
+;     managed entirely at runtime by ari-app/pjsipConfig.js (writeAgentBlock/
+;     deprovisionAgentBlock), marker-comment-delimited ("; chumz-agent:<id>")
+;     — provision each real agent again through the dashboard after a
+;     rebuild rather than hand-copying these back in.
+;   - The legacy test1/test2/test accounts sitting in the live file — ad hoc
+;     manual test credentials, never provisioned through pjsipConfig.js, not
+;     part of the real production setup worth preserving in a template.
+
+[transport-wss]
+type = transport
+protocol = wss
+bind = 0.0.0.0
+
+[transport-udp]
+type = transport
+protocol = udp
+bind = 0.0.0.0:5060
+
+[transport-tcp]
+type = transport
+protocol = tcp
+bind = 0.0.0.0:5060
+
+; ── Africa's Talking SIP trunk (test number 0711082161) ────────────────────
+; ACL-based auth per AT — no username/password, they authenticate purely by
+; source IP (197.248.0.196 / ke.sip.africastalking.com). direct_media=no
+; keeps Asterisk in the media path always, since the far side speaks plain
+; RTP (ulaw/alaw) and our browser softphones speak SRTP/ICE — Asterisk has
+; to bridge/transcode between the two, they can never talk directly.
+[at-trunk]
+type = endpoint
+context = from-at-trunk
+disallow = all
+allow = ulaw,alaw
+transport = transport-udp
+identify_by = ip
+aors = at-trunk-aor
+direct_media = no
+rtp_symmetric = yes
+force_rport = yes
+rewrite_contact = yes
+
+[at-trunk-aor]
+type = aor
+contact = sip:ke.sip.africastalking.com:5060
+
+[at-trunk-identify]
+type = identify
+endpoint = at-trunk
+match = 197.248.0.196
