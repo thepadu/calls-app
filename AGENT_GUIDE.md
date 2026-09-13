@@ -62,6 +62,10 @@ Four more items — **Analytics**, **Agents**, **IVR Builder**, and **Settings**
 
 Everywhere in the app, a floating dialer and your status/presence control sit in a fixed position — you never need to visit a specific page just to make a call or change your status.
 
+![Sidebar comparison showing an agent's five pages, and the four extra pages a supervisor also sees](docs/agent-guide/nav-map.svg)
+
+*A supervisor's sidebar is a strict superset of an agent's — the same five pages, plus four more.*
+
 ---
 
 ## 3. Taking a call
@@ -75,6 +79,10 @@ When a caller is waiting, Chumz Phone doesn't pick one agent to ring — it **ri
 
 While you're being rung, your status automatically flips to **Ringing**, and once you answer, it flips to **On call** — both are automatic; you don't set them yourself (see the full list of statuses below).
 
+![A caller waiting in the queue rings every available agent's browser at once; the first to answer connects, the rest stop ringing](docs/agent-guide/ring-all-flow.svg)
+
+*Nobody is singled out to take a call — everyone Available is rung together, and whoever answers first gets it.*
+
 ### Your presence status
 
 Your status pill tells the queue whether you can be rung. Three of the five possible states are automatic; you only ever set two of them yourself:
@@ -86,6 +94,10 @@ Your status pill tells the queue whether you can be rung. Three of the five poss
 | **Ringing** | System | A caller is ringing your browser right now. |
 | **Break** | You | You're stepping away for a few minutes. You won't be rung, but you're still signed in. |
 | **Offline** | You (or automatic, before setup) | Signed out or done for the day. Also the state you're stuck in before a softphone is provisioned. |
+
+![Available leads to Ringing and then On call automatically as a call arrives and ends; Break and Offline are states you switch into yourself](docs/agent-guide/presence-states.svg)
+
+*Only Available and Break/Offline are yours to set — Ringing and On call happen to you, automatically, as a call arrives and ends.*
 
 ### Answering
 
@@ -162,6 +174,10 @@ A live directory of every teammate, refreshing automatically every few seconds, 
 ## 7. Wrap-up: turning a call into a ticket
 
 Every call you hang up opens a short wrap-up prompt automatically. This is the only way a call becomes a **ticket** that a supervisor (or you, later) can track, filter, and follow up on — a call that's answered but never wrapped up leaves no record beyond the raw call log.
+
+![Hanging up automatically opens the wrap-up prompt, which creates a ticket; pressing E jumps to it early and pressing T logs a ticket directly at any point mid-call](docs/agent-guide/wrapup-flow.svg)
+
+*The wrap-up prompt is the normal path from a hang-up to a ticket. E and T are shortcuts into the same destination, for when you don't want to wait.*
 
 ### Disposition
 
@@ -301,6 +317,22 @@ Those are supervisor-only, both in the sidebar and if you try the URL directly �
 
 Everything above applies to supervisors too — this section covers what's *additionally* available to you.
 
+### Becoming a supervisor
+
+There's no separate sign-up for this — it's a role on your existing agent record. If your email was already on the system's supervisor list before your very first login, you were made a supervisor automatically the moment you signed in. Otherwise, an existing supervisor promotes you from the Agents page the same way they'd edit anyone else's roster entry (see below) — there's no self-service way to grant yourself the role, by design.
+
+### Supervisor quick start
+
+If you're setting up the phone line for the first time, or bringing on a new batch of agents, this is roughly the order that unblocks people fastest:
+
+1. **Add your team to the roster.** Name, phone number, and work email for each person, from the Agents page.
+2. **Provision each agent's softphone.** One click (**Add Softphone**) per person — nobody on your team can go Available until this is done for them.
+3. **Set the greeting and menu.** Open the IVR Builder and record what callers actually hear first — the default greeting and menu options are a starting point, not necessarily what you want live.
+4. **Set your business hours.** If the line shouldn't ring 24/7, configure this before agents start fielding real calls outside the hours you actually intend to staff.
+5. **Decide on forwarding and call rating.** Both are optional and off by default — turn them on only once you've read what each one actually does (below), since both change what a live caller experiences the moment you enable them.
+
+None of this is a one-time setup you'll never revisit — expect to come back to the Agents page every time someone joins or leaves, and to the IVR Builder whenever the menu itself needs to change.
+
 ### Agents (roster & provisioning)
 
 The Agents page is the full roster: every agent's name, phone number, email, role (agent or supervisor), and current status. From here you can:
@@ -344,13 +376,21 @@ Each row saves independently, and a live **call flow preview** on the same page 
 
 Four panels live under Settings:
 
-**Business Hours** — an on/off toggle, opening and closing time (East Africa Time), which days of the week are "open," and an after-hours message. Outside these hours, callers hear that message instead of the normal menu, and no agent needs to be online for this to work at all. Turning this **on** requires confirming the change, since it immediately affects what the very next caller outside those hours will hear; turning it off doesn't ask for confirmation, since disabling something is treated as the safe direction.
+#### Business Hours
 
-**Call forwarding rules** — you can define a destination (an agent, a queue name, or a number) for each of four conditions: **No answer**, **Line busy**, **Always**, and **After hours**. It's worth knowing exactly what's real here today: **only "No answer" is actually wired into live routing**, and only in the specific case where *zero* agents with a softphone are Available at all — one or two agents being busy still queues normally rather than forwarding. "Line busy" and "Always" rules can be saved, but nothing in the live system currently acts on them. "After hours" is superseded entirely by the dedicated Business Hours panel above, which has its own message and its own logic — a rule set here for that condition has no additional effect.
+An on/off toggle, opening and closing time (East Africa Time), which days of the week are "open," and an after-hours message. Outside these hours, callers hear that message instead of the normal menu, and no agent needs to be online for this to work at all. Turning this **on** requires confirming the change, since it immediately affects what the very next caller outside those hours will hear; turning it off doesn't ask for confirmation, since disabling something is treated as the safe direction.
 
-**Call rating** — a single toggle that, when on, plays a 1–5 rating prompt to the caller right after the agent hangs up, before the line disconnects. Off by default, since it changes what every caller experiences on every call; turning it on asks for confirmation for the same reason the Business Hours toggle does. The resulting rating shows up as a star rating on that call's detail view (see [§9](#9-calls-history-and-callbacks)).
+#### Call forwarding rules
 
-**Hold Music** — upload a custom MP3 (up to 8MB) to replace the default music callers hear while on hold in the queue, or reset back to the default. This takes effect immediately, including for anyone already on hold at the moment you change it — nobody needs to redial to hear the new track.
+You can define a destination (an agent, a queue name, or a number) for each of four conditions: **No answer**, **Line busy**, **Always**, and **After hours**. It's worth knowing exactly what's real here today: **only "No answer" is actually wired into live routing**, and only in the specific case where *zero* agents with a softphone are Available at all — one or two agents being busy still queues normally rather than forwarding. "Line busy" and "Always" rules can be saved, but nothing in the live system currently acts on them. "After hours" is superseded entirely by the dedicated Business Hours panel above, which has its own message and its own logic — a rule set here for that condition has no additional effect.
+
+#### Call rating
+
+A single toggle that, when on, plays a 1–5 rating prompt to the caller right after the agent hangs up, before the line disconnects. Off by default, since it changes what every caller experiences on every call; turning it on asks for confirmation for the same reason the Business Hours toggle does. The resulting rating shows up as a star rating on that call's detail view (see [§9](#9-calls-history-and-callbacks)).
+
+#### Hold Music
+
+Upload a custom MP3 (up to 8MB) to replace the default music callers hear while on hold in the queue, or reset back to the default. This takes effect immediately, including for anyone already on hold at the moment you change it — nobody needs to redial to hear the new track.
 
 **A general rule across all four of these panels**: turning something **on** that changes what a live caller experiences always asks you to confirm first; turning it **off** never does, since disabling something is the reversible, lower-risk direction.
 
