@@ -1,6 +1,5 @@
 const { createClient } = require('@supabase/supabase-js');
 const ws = require('ws');
-const { GHOST_AGENT_STALE_MS } = require('../shared/constants');
 
 // supabase-js instantiates a Realtime client unconditionally (even though
 // this app never subscribes to anything), which needs a WebSocket
@@ -449,6 +448,19 @@ async function reconcileStaleAgentsOnStartup() {
 // heartbeat, unlike 'on_call' (deliberately excluded below: a real on-call
 // agent's heartbeat legitimately goes stale while their softphone tab is
 // busy with a call, not because they left).
+//
+// Must match calls-app/api.js's own copy of this constant — kept as a
+// plain duplicated literal, not a shared module, because ari-app and
+// calls-app deploy to genuinely separate environments (this VPS directory
+// vs. DigitalOcean App Platform's own build of the calls-app subtree) with
+// no guarantee a sibling `shared/` directory exists at runtime in either
+// one. A cross-package relative require here works in the git repo and in
+// local dev, but crashed this process outright the one time it was tried
+// against the real VPS deploy (MODULE_NOT_FOUND for '../shared/constants',
+// since /opt/chumz-ari-app has no sibling shared/ on disk) — reverted
+// after confirming that failure live.
+const GHOST_AGENT_STALE_MS = 90 * 1000;
+
 async function reconcileGhostAgents() {
     // Compared as epoch millis, not raw strings — Postgres/PostgREST's
     // "+00:00" suffix and JS's own toISOString() "Z" suffix don't sort

@@ -243,11 +243,17 @@ async function claimCallOnAsterisk(sessionId, agentId) {
     }
 }
 
-// Shared with ari-app/supabase.js via ../shared/constants.js — this is only
-// used to keep the topbar's "N agents live" count from overcounting a dead
-// tab during the window before that sweep flips it back to offline, not to
-// enforce staleness itself (ari-app owns that).
-const { GHOST_AGENT_STALE_MS } = require('../shared/constants');
+// Must match ari-app/supabase.js's own copy of this constant — kept as a
+// plain duplicated literal rather than a shared module: ari-app (this VPS
+// directory) and calls-app (DigitalOcean App Platform's own build of this
+// subtree) deploy to genuinely separate environments with no guarantee a
+// sibling shared/ directory exists at runtime in either one. A cross-
+// package relative require here crashed ari-app outright the one time it
+// was tried against the real VPS deploy — reverted after confirming that
+// failure live. Only used to keep the topbar's "N agents live" count from
+// overcounting a dead tab during the window before ari-app's own sweep
+// flips it back to offline — not enforcing staleness itself.
+const GHOST_AGENT_STALE_MS = 90 * 1000;
 
 // JSON API for the React web app (/web). Mirrors the data shown on the old
 // HTML dashboard (dashboard.js, now removed) but as JSON instead of rendered
