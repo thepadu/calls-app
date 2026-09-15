@@ -1013,9 +1013,22 @@ async function giveUpOnQueuedCustomer({ channel, sessionId, bridge }) {
 
     await (bridge || holdingBridge).removeChannel({ channel: channel.id }).catch(() => {});
 
+    // A real customer waited the full queue timeout with nobody ever
+    // available to take their call — previously this only ever showed up
+    // as a console.log line nobody was watching in real time, unlike most
+    // other failure conditions in this app (ring failures, ghost agents,
+    // ARI health) which already alert. Includes the caller's number since
+    // it's the one piece of context that makes this alert actually
+    // actionable (call them back) rather than just informational — every
+    // other log line in this file already logs numbers in plaintext, so
+    // this isn't a new exposure.
+    const callerNumber = normalizePhone(channel.caller.number) || 'Unknown-Caller';
+    const waitedSeconds = Math.round(MAX_QUEUE_WAIT_MS / 1000);
+
     const destination = await getNoAgentsForwardingDestination();
     if (destination) {
         console.log(`⌛↪️  ${sessionId}: queue wait exceeded ${MAX_QUEUE_WAIT_MS / 1000}s, forwarding to ${destination}`);
+        alertGChat(`⌛↪️ Caller ${callerNumber} waited ${waitedSeconds}s with no agent available — forwarded to ${destination}.`);
         await upsertCallLog({ session_id: sessionId, status: 'forwarded' });
         await channel.setChannelVar({ variable: 'FORWARD_DEST', value: destination }).catch(() => {});
         await channel.continueInDialplan({ context: 'forward-external', extension: 's', priority: 1 }).catch(() => {});
@@ -1023,6 +1036,7 @@ async function giveUpOnQueuedCustomer({ channel, sessionId, bridge }) {
     }
 
     console.log(`⌛ ${sessionId}: queue wait exceeded ${MAX_QUEUE_WAIT_MS / 1000}s, no forwarding configured — apologizing and hanging up`);
+    alertGChat(`⌛ Caller ${callerNumber} waited ${waitedSeconds}s with no agent available — apologized and hung up. Nobody was online to take this call.`);
     await playText(channel, "We're sorry, all our agents are still busy right now. Please try again shortly.", voiceOpts).catch(() => {});
     await upsertCallLog({ session_id: sessionId, status: 'failed' });
     await channel.hangup().catch(() => {});
