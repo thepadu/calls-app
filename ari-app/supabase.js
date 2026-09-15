@@ -138,7 +138,7 @@ async function getAgentBySipUsername(sipUsername) {
 async function getAgentSipCredentials(agentId) {
     const { data, error } = await supabase
         .from('agent_sip_credentials')
-        .select('sip_username, agents(status)')
+        .select('sip_username, agents(status, name)')
         .eq('agent_id', agentId)
         .maybeSingle();
     if (error) {
@@ -146,7 +146,7 @@ async function getAgentSipCredentials(agentId) {
         return null;
     }
     if (!data?.sip_username) return null;
-    return { sipUsername: data.sip_username, status: data.agents?.status ?? null };
+    return { sipUsername: data.sip_username, status: data.agents?.status ?? null, name: data.agents?.name ?? null };
 }
 
 // "No agents online" forwarding — reuses the existing 'no_answer' condition
@@ -469,7 +469,7 @@ async function reconcileGhostAgents() {
 
     const { data, error } = await supabase
         .from('agents')
-        .select('id, last_seen_at, agent_sip_credentials(sip_username)')
+        .select('id, name, last_seen_at, agent_sip_credentials(sip_username)')
         .in('status', ['available', 'ringing', 'break']);
 
     if (error) {
@@ -482,20 +482,23 @@ async function reconcileGhostAgents() {
         return [];
     }
 
-    const staleIds = data
+    const staleAgents = data
         .filter(a => a.agent_sip_credentials?.sip_username)
         .filter(a => !a.last_seen_at || new Date(a.last_seen_at).getTime() < staleBeforeMs)
-        .map(a => a.id);
+        .map(a => ({ id: a.id, name: a.name }));
 
-    if (staleIds.length === 0) return [];
+    if (staleAgents.length === 0) return [];
 
-    const { error: updateError } = await supabase.from('agents').update({ status: 'offline' }).in('id', staleIds);
+    const { error: updateError } = await supabase
+        .from('agents')
+        .update({ status: 'offline' })
+        .in('id', staleAgents.map(a => a.id));
     if (updateError) {
         console.error('❌ Failed to reconcile ghost agents:', updateError.message);
         return [];
     }
 
-    return staleIds;
+    return staleAgents;
 }
 
 // Runtime counterpart to reconcileStaleAgentsOnStartup: reconcileGhostAgents

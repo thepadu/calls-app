@@ -856,9 +856,14 @@ async function ringOneAgent(agent, waiting, ringGroup, customerNumber) {
     // read and both originate a real leg to the same softphone — a false
     // return here means we lost that race, not that origination failed, so
     // ringFailureCounts/alerting must not be touched.
+    // Falls back to a numeric label when name isn't available — claimQueuedCall's
+    // agent object always has it now (getAgentSipCredentials selects it), but this
+    // stays defensive against any future caller that doesn't.
+    const agentLabel = agent.name || `Agent ${agent.id}`;
+
     const claimed = await setAgentStatus(agent.id, 'ringing', 'available');
     if (!claimed) {
-        console.log(`⏭️  Agent ${agent.id} already claimed elsewhere — skipping for ${waiting.sessionId}`);
+        console.log(`⏭️  ${agentLabel} already claimed elsewhere — skipping for ${waiting.sessionId}`);
         return;
     }
     // Registered before origination starts, not after: Asterisk's
@@ -875,6 +880,7 @@ async function ringOneAgent(agent, waiting, ringGroup, customerNumber) {
         channel: waiting.channel,
         sessionId: waiting.sessionId,
         agentId: agent.id,
+        agentName: agent.name || null,
         bridge: waiting.bridge,
         joinedAt: waiting.joinedAt
     });
@@ -895,13 +901,13 @@ async function ringOneAgent(agent, waiting, ringGroup, customerNumber) {
         ringFailureCounts.delete(agent.id);
     } catch (err) {
         agentLegBySessionId.delete(channelId);
-        console.error(`❌ Failed to ring agent ${agent.id}:`, errText(err));
+        console.error(`❌ Failed to ring ${agentLabel}:`, errText(err));
         const failures = (ringFailureCounts.get(agent.id) || 0) + 1;
         if (failures >= RING_FAILURE_THRESHOLD) {
             console.warn(
-                `⚠️ Agent ${agent.id} failed to ring ${failures} times in a row — flipping offline instead of retrying again next tick`
+                `⚠️ ${agentLabel} failed to ring ${failures} times in a row — flipping offline instead of retrying again next tick`
             );
-            alertGChat(`⚠️ Agent ${agent.id} failed to ring ${failures} times in a row for a real waiting caller — flipped offline.`);
+            alertGChat(`⚠️ ${agentLabel} failed to ring ${failures} times in a row for a real waiting caller — flipped offline.`);
             ringFailureCounts.delete(agent.id);
             await setAgentStatus(agent.id, 'offline', 'ringing');
         } else {
@@ -977,7 +983,7 @@ async function claimQueuedCall(sessionId, agentId) {
     const ringGroup = [];
     ringGroupBySessionId.set(sessionId, ringGroup);
 
-    await ringOneAgent({ id: agentId, sipUsername: target.sipUsername }, waiting, ringGroup, customerNumber);
+    await ringOneAgent({ id: agentId, sipUsername: target.sipUsername, name: target.name }, waiting, ringGroup, customerNumber);
 
     if (ringGroup.length === 0) {
         ringGroupBySessionId.delete(sessionId);
@@ -1066,6 +1072,10 @@ async function bridgeAgentLeg(agentChannel, agentId, customerSessionId) {
     agentLegBySessionId.delete(agentChannel.id);
     const customerChannel = pending ? pending.channel : null;
     const customerHoldingBridge = pending ? pending.bridge : null;
+    // Falls back to a numeric label on the "customer already gone"
+    // early-exit path below, where `pending` is null and there's no name
+    // to have carried through.
+    const agentLabel = pending?.agentName || `Agent ${agentId}`;
 
     // Every agent-leg channel in a ring-all fan-out reaches this function
     // the instant IT enters Stasis — essentially simultaneously for every
@@ -1113,7 +1123,7 @@ async function bridgeAgentLeg(agentChannel, agentId, customerSessionId) {
         // requeue the customer (a sibling might still succeed a moment
         // later); only the last surviving leg, with nobody having claimed
         // the session, actually gives up on their behalf.
-        console.log(`📵 Agent ${agentId} didn't answer ${customerSessionId}: ${err.message}`);
+        console.log(`📵 ${agentLabel} didn't answer ${customerSessionId}: ${err.message}`);
         customerChannel.removeListener('StasisEnd', onEarlyCustomerHangup);
         await agentChannel.hangup().catch(() => {});
         await setAgentStatus(agentId, 'available', 'ringing');
@@ -1184,7 +1194,7 @@ async function bridgeAgentLeg(agentChannel, agentId, customerSessionId) {
     // synchronous-turn guarantee the old pre-answer check relied on, just
     // moved to after a real answer.
     if (claimedSessions.has(customerSessionId) || !ringGroupBySessionId.has(customerSessionId)) {
-        console.log(`📵 Agent ${agentId} answered ${customerSessionId} too late — already resolved elsewhere`);
+        console.log(`📵 ${agentLabel} answered ${customerSessionId} too late — already resolved elsewhere`);
         customerChannel.removeListener('StasisEnd', onEarlyCustomerHangup);
         await agentChannel.hangup().catch(() => {});
         await setAgentStatus(agentId, 'available', 'ringing');
@@ -1252,7 +1262,7 @@ async function bridgeAgentLeg(agentChannel, agentId, customerSessionId) {
             status: finalStatus,
             duration: state.startedAt ? Math.round((Date.now() - state.startedAt) / 1000) : 0
         });
-        console.log(`📴 Call ended: ${customerSessionId} <-> agent ${agentId} (${finalStatus})`);
+        console.log(`📴 Call ended: ${customerSessionId} <-> ${agentLabel} (${finalStatus})`);
     };
 
     // teardown()'s own agentChannel.hangup() below cascades into a second
@@ -1317,7 +1327,7 @@ async function bridgeAgentLeg(agentChannel, agentId, customerSessionId) {
         });
         await setAgentStatus(agentId, 'on_call');
 
-        console.log(`🔗 Bridged ${customerSessionId} with agent ${agentId}`);
+        console.log(`🔗 Bridged ${customerSessionId} with ${agentLabel}`);
     } catch (err) {
         // Previously unhandled — this rejection propagated all the way to
         // the generic StasisStart catch, leaving the claim held forever,
@@ -1326,7 +1336,7 @@ async function bridgeAgentLeg(agentChannel, agentId, customerSessionId) {
         // several ways teardown() can be reached, all idempotent. The bridge
         // never really formed, so this always takes the plain-hangup path,
         // never the rating one.
-        console.error(`❌ Error bridging agent ${agentId} to ${customerSessionId}:`, err.message);
+        console.error(`❌ Error bridging ${agentLabel} to ${customerSessionId}:`, err.message);
         await teardown('failed');
         await customerChannel.hangup().catch(() => {});
     }
@@ -2101,20 +2111,21 @@ async function main() {
     setInterval(
         () =>
             reconcileGhostAgents()
-                .then(staleIds => {
-                    if (staleIds.length === 0) return;
-                    console.log(`👻 Reconciled ${staleIds.length} ghost agent(s) back to offline`);
+                .then(staleAgents => {
+                    if (staleAgents.length === 0) return;
+                    console.log(`👻 Reconciled ${staleAgents.length} ghost agent(s) back to offline`);
 
                     const now = Date.now();
-                    for (const agentId of staleIds) {
+                    for (const { id: agentId, name: agentName } of staleAgents) {
+                        const agentLabel = agentName || `Agent ${agentId}`;
                         const recent = (ghostReconcileTimestamps.get(agentId) || []).filter(t => now - t < GHOST_FLAP_WINDOW_MS);
                         recent.push(now);
                         ghostReconcileTimestamps.set(agentId, recent);
                         if (recent.length >= GHOST_FLAP_THRESHOLD) {
                             console.warn(
-                                `⚠️ Agent ${agentId}'s softphone connection has dropped ${recent.length} times in the last hour — likely an unstable connection, not a one-off`
+                                `⚠️ ${agentLabel}'s softphone connection has dropped ${recent.length} times in the last hour — likely an unstable connection, not a one-off`
                             );
-                            alertGChat(`⚠️ Agent ${agentId}'s softphone has dropped ${recent.length} times in the last hour — likely an unstable connection.`);
+                            alertGChat(`⚠️ ${agentLabel}'s softphone has dropped ${recent.length} times in the last hour — likely an unstable connection.`);
                         }
                     }
                 })
