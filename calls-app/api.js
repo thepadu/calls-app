@@ -92,6 +92,48 @@ async function hangupCallOnAsterisk(sessionId) {
     }
 }
 
+// agents.status alone isn't trustworthy for deciding whether a status
+// write is safe — it's just a DB column anyone can write, including a
+// value that's gone stale relative to what's actually happening on
+// Asterisk. This asks ari-app, the real source of truth, whether it
+// currently has agentId genuinely ringing or bridged before letting a
+// status edit silently desync the DB from a real, live call. Same
+// fetch/timeout/fail-open shape as hangupCallOnAsterisk above — fails
+// open (treats as "not live") if ari-app's internal endpoint can't be
+// reached at all, so a status editor doesn't become totally unusable
+// over a brief internal-network hiccup.
+async function checkAgentLiveOnAsterisk(agentId) {
+    const internalUrl = process.env.ARI_APP_INTERNAL_URL;
+    const internalSecret = process.env.ARI_APP_INTERNAL_SECRET;
+    if (!internalUrl || !internalSecret) {
+        console.error('❌ ARI_APP_INTERNAL_URL/ARI_APP_INTERNAL_SECRET not configured — cannot check live-call status');
+        return { reachable: false };
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), INTERNAL_SYNC_TIMEOUT_MS);
+    try {
+        const response = await fetch(`${internalUrl}/internal/agent-live-status`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Chumz-Internal-Secret': internalSecret },
+            body: JSON.stringify({ agentId }),
+            signal: controller.signal
+        });
+        if (!response.ok) {
+            const body = await response.text().catch(() => '');
+            console.error(`❌ ari-app agent-live-status responded ${response.status}: ${body}`);
+            return { reachable: false };
+        }
+        const data = await response.json();
+        return { reachable: true, live: !!data.live, kind: data.kind ?? null };
+    } catch (err) {
+        console.error('❌ Failed to reach ari-app to check agent live status:', err.message);
+        return { reachable: false };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 // Unlike syncAgentToAsterisk/hangupCallOnAsterisk above, this fails CLOSED:
 // the caller (DELETE /api/agents/:id) must not delete the agent if this
 // returns false. Provisioning failing open just means an agent isn't
@@ -798,6 +840,19 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
             return res.status(404).json({ error: 'No agent record linked to your account yet' });
         }
 
+        // Self-service must never silently override a status ari-app says
+        // is genuinely real right now — an agent clicking a status button
+        // while their phone is ringing or they're on a call almost
+        // certainly didn't mean to fight the call itself, just missed that
+        // it was happening. Blocked outright (unlike the supervisor route
+        // below, which warns but allows — see PATCH /api/agents/:id).
+        const live = await checkAgentLiveOnAsterisk(agent.id);
+        if (live.reachable && live.live) {
+            return res.status(409).json({
+                error: `Cannot change status while ${live.kind === 'on_call' ? "you're on a call" : 'your phone is ringing'} — this updates automatically when it ends.`
+            });
+        }
+
         try {
             const { data, error } = await setAgentStatus(agent, status);
             if (error) throw new Error(error.message);
@@ -1290,12 +1345,26 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         }
 
         if (status !== undefined) {
+            // Checked before the write, not to block it (a supervisor
+            // override is a deliberate escape hatch for a stuck/ghost
+            // record and stays allowed either way — see PATCH
+            // /api/agents/me/status above for the self-service version,
+            // which blocks outright instead) — only so the response can
+            // tell the supervisor their edit doesn't match what ari-app
+            // believes is actually happening right now.
+            const live = await checkAgentLiveOnAsterisk(id);
             try {
                 const { data, error } = await setAgentStatus(agent, status);
                 if (error) throw new Error(error.message);
                 agent = data;
             } catch (err) {
                 return res.status(err instanceof PreconditionError ? 400 : 502).json({ error: err.message });
+            }
+            if (live.reachable && live.live && status !== 'on_call' && status !== 'ringing') {
+                return res.json({
+                    agent,
+                    warning: `This agent appears to be ${live.kind === 'on_call' ? 'on a live call' : 'ringing'} right now — this does not end that call.`
+                });
             }
         }
 

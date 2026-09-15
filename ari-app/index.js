@@ -170,6 +170,38 @@ const claimedSessions = new Set(); // customer sessionIds already won by an agen
 const outboundBySessionId = new Map(); // agent-originated sessionId -> { agentChannel, destChannel, bridge, bridged, cleaned, answeredAt }
 const activeBridgeBySessionId = new Map(); // customer sessionId -> the live agent<->customer mixing bridge, for add-a-party
 const partyChannelsBySessionId = new Map(); // customer sessionId -> Set of extra channels added (or still dialing) via add-a-party
+// customer sessionId -> agentId, set/deleted alongside activeBridgeBySessionId
+// in bridgeAgentLeg/teardown. Lets isAgentCurrentlyLive answer "is this
+// agent genuinely bridged right now" without reshaping
+// activeBridgeBySessionId's value (which has other read sites in the
+// add-a-party flow this shouldn't disturb).
+const onCallAgentBySessionId = new Map();
+
+// Cheap, read-only in-memory check: is THIS process, right now, treating
+// agentId as ringing or genuinely bridged on a live call? calls-app's own
+// agents.status column can be stale or clobbered by an unrelated edit
+// (a supervisor's roster PATCH, for instance) — this process's own maps
+// are the actual ground truth for "is there a real channel/bridge for this
+// agent right now." Scans existing maps rather than maintaining a parallel
+// one, so there's nothing new to keep in sync at every mutation site
+// beyond onCallAgentBySessionId above. Backs POST /internal/agent-live-status.
+function isAgentCurrentlyLive(agentId) {
+    for (const leg of agentLegBySessionId.values()) {
+        if (leg.agentId === agentId) return { live: true, kind: 'ringing' };
+    }
+    for (const group of ringGroupBySessionId.values()) {
+        if (group.some(sib => sib.agentId === agentId)) return { live: true, kind: 'ringing' };
+    }
+    for (const liveAgentId of onCallAgentBySessionId.values()) {
+        if (liveAgentId === agentId) return { live: true, kind: 'on_call' };
+    }
+    for (const pending of outboundBySessionId.values()) {
+        if (pending.agentId === agentId || pending.internalTargetAgentId === agentId) {
+            return { live: true, kind: pending.bridged ? 'on_call' : 'ringing' };
+        }
+    }
+    return { live: false };
+}
 
 let client;
 let holdingBridge;
@@ -434,6 +466,34 @@ http.createServer(async (req, res) => {
             res.writeHead(500, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: errText(err) }));
         }
+        return;
+    }
+
+    // Read-only — lets calls-app check whether this process genuinely has
+    // an agent ringing/bridged before it writes agents.status, so a
+    // roster edit or self-service status change can't silently desync the
+    // DB from a real, live call (see isAgentCurrentlyLive above).
+    if (req.method === 'POST' && req.url === '/internal/agent-live-status') {
+        if (rejectUnlessAuthorized(req, res)) return;
+
+        let body;
+        try {
+            body = await readJsonBody(req);
+        } catch (err) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: err.message }));
+            return;
+        }
+
+        const { agentId } = body;
+        if (!Number.isInteger(agentId) || agentId <= 0) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Invalid agentId' }));
+            return;
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(isAgentCurrentlyLive(agentId)));
         return;
     }
 
@@ -787,7 +847,20 @@ async function tryDequeueNext() {
 // check and cleanup don't care which caller populated ringGroupBySessionId,
 // only that it exists.
 async function ringOneAgent(agent, waiting, ringGroup, customerNumber) {
-    await setAgentStatus(agent.id, 'ringing');
+    // Compare-and-swap: only proceeds if this agent's status is still
+    // exactly 'available' at the moment of the write. Without this, two
+    // concurrent calls into ringOneAgent for the same agent but different
+    // customers (a dequeueNext tick racing a claimQueuedCall, or two
+    // overlapping dequeueNext ticks before dequeueInFlight could guard
+    // against it) could both pass their own earlier, separate availability
+    // read and both originate a real leg to the same softphone — a false
+    // return here means we lost that race, not that origination failed, so
+    // ringFailureCounts/alerting must not be touched.
+    const claimed = await setAgentStatus(agent.id, 'ringing', 'available');
+    if (!claimed) {
+        console.log(`⏭️  Agent ${agent.id} already claimed elsewhere — skipping for ${waiting.sessionId}`);
+        return;
+    }
     // Registered before origination starts, not after: Asterisk's
     // StasisStart event (over the separate WebSocket) and this originate()
     // call's HTTP response travel independently with no guaranteed
@@ -830,10 +903,10 @@ async function ringOneAgent(agent, waiting, ringGroup, customerNumber) {
             );
             alertGChat(`⚠️ Agent ${agent.id} failed to ring ${failures} times in a row for a real waiting caller — flipped offline.`);
             ringFailureCounts.delete(agent.id);
-            await setAgentStatus(agent.id, 'offline');
+            await setAgentStatus(agent.id, 'offline', 'ringing');
         } else {
             ringFailureCounts.set(agent.id, failures);
-            await setAgentStatus(agent.id, 'available');
+            await setAgentStatus(agent.id, 'available', 'ringing');
         }
     }
 }
@@ -956,7 +1029,9 @@ async function giveUpOnQueuedCustomer({ channel, sessionId, bridge }) {
 }
 
 // Hangs up every ringing leg except the winner and reverts their agent
-// status — called the instant one agent answers.
+// status — called only once a leg has actually completed answer()
+// successfully AND won the claim (see bridgeAgentLeg below), not the
+// instant a leg merely enters Stasis.
 async function stopSiblingRings(customerSessionId, winningChannelId) {
     const siblings = ringGroupBySessionId.get(customerSessionId) || [];
     ringGroupBySessionId.delete(customerSessionId);
@@ -967,7 +1042,7 @@ async function stopSiblingRings(customerSessionId, winningChannelId) {
             .map(async sib => {
                 agentLegBySessionId.delete(sib.channel.id);
                 await sib.channel.hangup().catch(() => {});
-                await setAgentStatus(sib.agentId, 'available');
+                await setAgentStatus(sib.agentId, 'available', 'ringing');
             })
     );
 }
@@ -978,36 +1053,36 @@ async function bridgeAgentLeg(agentChannel, agentId, customerSessionId) {
     const customerChannel = pending ? pending.channel : null;
     const customerHoldingBridge = pending ? pending.bridge : null;
 
-    // No `await` between this check and claimedSessions.add() below — both
-    // run synchronously in the same event-loop turn, so two agents
-    // answering "simultaneously" still resolve one-at-a-time here. Whoever
-    // loses the race sees claimedSessions already holding this session and
-    // backs off instead of double-bridging the same customer channel.
+    // Every agent-leg channel in a ring-all fan-out reaches this function
+    // the instant IT enters Stasis — essentially simultaneously for every
+    // agent being rung, well before any of them has actually been
+    // answered. This check only rules out the cases where there's nothing
+    // left to even attempt: the customer's already gone, or another leg
+    // has ALREADY won (claimedSessions). It does NOT decide who wins —
+    // that used to happen right here (claiming and cancelling siblings
+    // before this leg had even tried to answer, so "first to answer wins"
+    // didn't actually hold: whichever leg's StasisStart got processed
+    // first won, regardless of who picked up). The claim now happens only
+    // after a real answer() below.
     //
-    // ringGroupBySessionId.has(...) catches a narrower, earlier version of
-    // the same race: this agent's originate() can still be in flight (not
-    // yet pushed into the ring group array in dequeueNext) when the
-    // customer hangs up — the global StasisEnd handler's stopSiblingRings
-    // call only hangs up legs already IN that array, and deletes this map
-    // entry regardless, so its absence here reliably means the customer's
-    // own cleanup already ran even for a leg that arrived too late to be
-    // in the array yet. Checked BEFORE answer() specifically so a customer
-    // who already left never sees the agent's softphone briefly "answer"
-    // only to be instantly torn down a moment later.
+    // ringGroupBySessionId.has(...) catches a narrower, separate race: this
+    // agent's originate() can still be in flight (not yet pushed into the
+    // ring group array in dequeueNext) when the customer hangs up — the
+    // global StasisEnd handler's stopSiblingRings call only hangs up legs
+    // already IN that array, and deletes this map entry regardless, so its
+    // absence here reliably means the customer's own cleanup already ran
+    // even for a leg that arrived too late to be in the array yet.
     if (!customerChannel || claimedSessions.has(customerSessionId) || !ringGroupBySessionId.has(customerSessionId)) {
         await agentChannel.hangup().catch(() => {});
-        await setAgentStatus(agentId, 'available');
+        await setAgentStatus(agentId, 'available', 'ringing');
         return;
     }
-    claimedSessions.add(customerSessionId);
 
-    await stopSiblingRings(customerSessionId, agentChannel.id);
-
-    // Catches the customer hanging up in the narrow window while we're still
-    // awaiting the agent's answer() below — the real cleanup listeners aren't
-    // attached until after answer() succeeds, so without this a hangup here
-    // would only ever surface later as a failed bridge.addChannel once the
-    // agent's leg tries to connect to an already-gone customer channel.
+    // Registered immediately, before any await — not after stopSiblingRings
+    // like before, since stopSiblingRings no longer runs pre-answer at all.
+    // Multiple siblings can now be concurrently inside answer() at once, so
+    // each one independently needs its own early-hangup guard on the
+    // shared customerChannel.
     let customerHungUpEarly = false;
     const onEarlyCustomerHangup = () => {
         customerHungUpEarly = true;
@@ -1018,15 +1093,54 @@ async function bridgeAgentLeg(agentChannel, agentId, customerSessionId) {
         await agentChannel.answer();
     } catch (err) {
         // The agent rejected, hung up, or the leg failed before actually
-        // connecting. Without this, the customer was stranded forever: the
-        // claim was never released, so no other agent could ever be bridged
-        // to them, they were already dropped from waitingQueue by the
-        // dequeue that started this ring, and nothing would retry them.
+        // connecting. Because siblings are no longer pre-emptively killed,
+        // this can now happen while OTHER siblings for the same customer
+        // are still mid-answer() — so this leg must NOT unconditionally
+        // requeue the customer (a sibling might still succeed a moment
+        // later); only the last surviving leg, with nobody having claimed
+        // the session, actually gives up on their behalf.
         console.log(`📵 Agent ${agentId} didn't answer ${customerSessionId}: ${err.message}`);
         customerChannel.removeListener('StasisEnd', onEarlyCustomerHangup);
-        claimedSessions.delete(customerSessionId);
         await agentChannel.hangup().catch(() => {});
-        await setAgentStatus(agentId, 'available');
+        await setAgentStatus(agentId, 'available', 'ringing');
+
+        if (claimedSessions.has(customerSessionId)) {
+            // Someone else already won while we were failing/cleaning up.
+            return;
+        }
+
+        const remainingGroup = ringGroupBySessionId.get(customerSessionId);
+        if (!remainingGroup) {
+            // The shared group is already gone entirely — either the
+            // customer hung up (the global StasisEnd handler's
+            // stopSiblingRings already ran, hanging up every sibling
+            // including us — quite possibly why our own answer() just
+            // failed) or a winning sibling's own stopSiblingRings already
+            // ran. Either way this customer is someone else's
+            // responsibility now, or already gone — not ours to requeue.
+            return;
+        }
+
+        // No `await` between this read and the splice below, so this is
+        // safe against another sibling doing the same removal concurrently
+        // — array mutation is synchronous, same "no await between check
+        // and mutation" guarantee claimedSessions relies on elsewhere.
+        const idx = remainingGroup.findIndex(sib => sib.channel.id === agentChannel.id);
+        if (idx !== -1) remainingGroup.splice(idx, 1);
+
+        if (remainingGroup.length > 0) {
+            // Other siblings are still mid-answer() (or haven't been
+            // attempted yet) — leave the requeue decision to whichever of
+            // them resolves next, including the possibility that IT
+            // becomes the last one standing and runs this same check.
+            return;
+        }
+
+        // We're the last surviving leg and nobody claimed this session —
+        // genuinely nobody picked up. Clean up the now-empty group entry
+        // and requeue, preserving the customer's original bridge/joinedAt
+        // exactly as before.
+        ringGroupBySessionId.delete(customerSessionId);
         if (!customerHungUpEarly) {
             // Preserve the customer's original bridge and joinedAt (from
             // `pending`, captured back in enterQueue) rather than fabricating
@@ -1047,12 +1161,34 @@ async function bridgeAgentLeg(agentChannel, agentId, customerSessionId) {
         return;
     }
 
+    // answer() succeeded — but this leg may have answered too late:
+    // another sibling could have already won (claimedSessions) or the
+    // customer could have already left (ringGroupBySessionId gone) while
+    // this leg was inside answer(). This check-and-claim is the actual
+    // "first to answer wins" decision point now — no `await` between the
+    // check and claimedSessions.add() below, mirroring the exact
+    // synchronous-turn guarantee the old pre-answer check relied on, just
+    // moved to after a real answer.
+    if (claimedSessions.has(customerSessionId) || !ringGroupBySessionId.has(customerSessionId)) {
+        console.log(`📵 Agent ${agentId} answered ${customerSessionId} too late — already resolved elsewhere`);
+        customerChannel.removeListener('StasisEnd', onEarlyCustomerHangup);
+        await agentChannel.hangup().catch(() => {});
+        await setAgentStatus(agentId, 'available', 'ringing');
+        // Deliberately no requeue here: either a winner already has this
+        // customer, or they already left — requeuing would double-serve or
+        // duplicate them in waitingQueue.
+        return;
+    }
+    claimedSessions.add(customerSessionId);
+
+    await stopSiblingRings(customerSessionId, agentChannel.id);
+
     customerChannel.removeListener('StasisEnd', onEarlyCustomerHangup);
     if (customerHungUpEarly) {
         console.log(`📵 Customer hung up before agent ${agentId} finished answering ${customerSessionId}`);
         claimedSessions.delete(customerSessionId);
         await agentChannel.hangup().catch(() => {});
-        await setAgentStatus(agentId, 'available');
+        await setAgentStatus(agentId, 'available', 'ringing');
         return;
     }
 
@@ -1077,6 +1213,7 @@ async function bridgeAgentLeg(agentChannel, agentId, customerSessionId) {
         cleaned = true;
         claimedSessions.delete(customerSessionId);
         activeBridgeBySessionId.delete(customerSessionId);
+        onCallAgentBySessionId.delete(customerSessionId);
         // Every party added via add-a-party, including one still ringing and
         // not yet actually in the bridge — otherwise a channel mid-dial when
         // the original call ends is never hung up here, only whenever
@@ -1086,6 +1223,15 @@ async function bridgeAgentLeg(agentChannel, agentId, customerSessionId) {
         if (state.bridge) await state.bridge.destroy().catch(() => {});
         await agentChannel.hangup().catch(() => {});
         if (partyChannels) await Promise.all([...partyChannels].map(ch => ch.hangup().catch(() => {})));
+        // Deliberately NOT CAS'd against 'on_call' (unlike the ring-phase
+        // reverts above) — teardown() can fire before the bridge ever
+        // finished forming (a StasisEnd racing the bridge-setup try block
+        // below), when the agent's real status is still 'ringing', not yet
+        // 'on_call'. CAS'ing against a single expected value here risks
+        // leaving the agent stuck at whatever status they were in — a real
+        // call has just definitively ended, so reverting to 'available'
+        // unconditionally is the correct terminal state regardless of what
+        // the row said a moment before.
         await setAgentStatus(agentId, 'available');
         await upsertCallLog({
             session_id: customerSessionId,
@@ -1127,6 +1273,7 @@ async function bridgeAgentLeg(agentChannel, agentId, customerSessionId) {
         const bridge = await client.bridges.create({ type: 'mixing' });
         state.bridge = bridge;
         activeBridgeBySessionId.set(customerSessionId, bridge);
+        onCallAgentBySessionId.set(customerSessionId, agentId);
         await (customerHoldingBridge || holdingBridge).removeChannel({ channel: customerChannel.id }).catch(() => {});
         await bridge.addChannel({ channel: [customerChannel.id, agentChannel.id] });
 
@@ -1529,7 +1676,13 @@ async function reconcileGhostOnCallAgents() {
     const stuck = onCallAgents.filter(a => !liveSipUsernames.has(a.sipUsername));
     if (stuck.length === 0) return [];
 
-    await Promise.all(stuck.map(a => setAgentStatus(a.id, 'available')));
+    // CAS'd against 'on_call' (safe here, unlike bridgeAgentLeg's teardown
+    // — there's no in-flight race to worry about, just the gap between the
+    // read above and this write): if an agent has already moved on from
+    // on_call by the time this runs (a real call of theirs genuinely ended
+    // and reverted them correctly in the meantime), this simply no-ops
+    // instead of overwriting whatever legitimate status they're in now.
+    await Promise.all(stuck.map(a => setAgentStatus(a.id, 'available', 'on_call')));
     return stuck;
 }
 

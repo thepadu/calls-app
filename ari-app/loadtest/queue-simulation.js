@@ -15,11 +15,15 @@
 // came out of). It only tests the correctness of this process's own
 // bookkeeping under concurrency.
 //
-// Usage: npm run loadtest:queue -- [numCustomers] [numAgents]
-//    or: node loadtest/queue-simulation.js [numCustomers] [numAgents]
-// (defaults: 30 customers, 4 agents). No env vars needed — the require()
-// interception below replaces supabase.js before it ever loads for real,
-// so index.js's own SUPABASE_URL/KEY usage is never reached.
+// Usage: npm run loadtest:queue -- [numCustomers] [numAgents] [answerFailureRate]
+//    or: node loadtest/queue-simulation.js [numCustomers] [numAgents] [answerFailureRate]
+// (defaults: 30 customers, 4 agents, 0 failure rate). answerFailureRate is a
+// 0-1 chance that any given ring attempt's answer() rejects (simulating a
+// real "agent didn't pick up" or a dead softphone) — added to exercise the
+// bridgeAgentLeg redesign's last-surviving-leg/no-double-requeue logic,
+// which a 0%-failure run can never touch. No env vars needed — the
+// require() interception below replaces supabase.js before it ever loads
+// for real, so index.js's own SUPABASE_URL/KEY usage is never reached.
 'use strict';
 
 const EventEmitter = require('events');
@@ -34,8 +38,9 @@ const Module = require('module');
 const supabasePath = path.join(__dirname, '..', 'supabase.js');
 const originalLoad = Module._load;
 const fakeAgents = [];
-const agentStatusLog = []; // { agentId, status } — asserted against at the end
+const agentStatusLog = []; // { agentId, status, expectedStatus, applied } — asserted against at the end
 const callLogWrites = [];
+const originateLog = []; // { channelId, endpoint } — every fake originate() call, for the claim-race scenario
 
 Module._load = function (request, parent, isMain) {
     if (parent && path.resolve(path.dirname(parent.filename), request) === supabasePath.replace(/\.js$/, '')) {
@@ -44,10 +49,23 @@ Module._load = function (request, parent, isMain) {
                 fakeAgents
                     .filter(a => a.status === 'available')
                     .map(a => ({ id: a.id, name: a.name, agent_sip_credentials: { sip_username: a.sipUsername } })),
-            setAgentStatus: async (agentId, status) => {
+            // Compare-and-swap, mirroring the real setAgentStatus in
+            // ari-app/supabase.js: with expectedStatus given, the write
+            // only applies if the agent's current status still matches —
+            // otherwise this is a no-op that returns false, exactly like a
+            // real UPDATE ... WHERE status = expectedStatus matching zero
+            // rows. Without this, the CAS added to ringOneAgent/
+            // stopSiblingRings/bridgeAgentLeg would silently behave like
+            // the old unconditional write in every simulated run, and a
+            // lost claim race would never actually show up as a skipped
+            // ring here.
+            setAgentStatus: async (agentId, status, expectedStatus = null) => {
                 const agent = fakeAgents.find(a => a.id === agentId);
-                if (agent) agent.status = status;
-                agentStatusLog.push({ agentId, status });
+                if (!agent) return false;
+                const applied = !expectedStatus || agent.status === expectedStatus;
+                if (applied) agent.status = status;
+                agentStatusLog.push({ agentId, status, expectedStatus, applied });
+                return applied;
             },
             upsertCallLog: async row => {
                 callLogWrites.push(row);
@@ -63,17 +81,11 @@ Module._load = function (request, parent, isMain) {
     return originalLoad.apply(this, arguments);
 };
 
-// claimedSessions is exported too but not directly asserted on below — its
-// effect is already what's being tested (no double-bridge, see the
-// assertions) rather than something to inspect separately. claimQueuedCall
-// (the manual "pick up this specific caller" path, a distinct race between
-// a supervisor's click and the automatic ring-all) isn't covered by this
-// script yet — a natural next scenario to add here, not attempted in this
-// pass.
 const {
     __setTestClient,
     enterQueue,
     tryDequeueNext,
+    claimQueuedCall,
     bridgeAgentLeg,
     waitingQueue,
     ringGroupBySessionId,
@@ -90,8 +102,17 @@ class FakeChannel extends EventEmitter {
         this.id = id || `sim-${nextChannelId++}`;
         this.caller = { number: callerNumber || '254700000000' };
         this._up = true;
+        // Decided once, at origination time (see makeFakeClient) — a real
+        // ring attempt only ever gets one answer() call in this codebase,
+        // so "does this specific leg answer" is a property of the leg, not
+        // something that needs to vary across repeated calls.
+        this._shouldFailAnswer = false;
     }
-    async answer() {}
+    async answer() {
+        if (this._shouldFailAnswer) {
+            throw new Error('FakeChannel: simulated no-answer (agent rejected/didn’t pick up)');
+        }
+    }
     async hangup() {
         if (!this._up) return;
         this._up = false;
@@ -121,10 +142,15 @@ class FakeBridge {
     }
 }
 
-function makeFakeClient() {
+function makeFakeClient({ answerFailureRate = 0 } = {}) {
     return {
         channels: {
-            originate: async ({ channelId }) => new FakeChannel(channelId)
+            originate: async ({ channelId, endpoint }) => {
+                originateLog.push({ channelId, endpoint });
+                const channel = new FakeChannel(channelId);
+                channel._shouldFailAnswer = Math.random() < answerFailureRate;
+                return channel;
+            }
         },
         bridges: {
             create: async () => new FakeBridge()
@@ -132,19 +158,88 @@ function makeFakeClient() {
     };
 }
 
+// --- Claim-race scenario -------------------------------------------------
+// Exercises the CAS added to ringOneAgent's setAgentStatus('ringing',
+// 'available') call: before it existed, a claimQueuedCall (an agent
+// clicking "pick up" in Live Queue) racing a concurrent dequeueNext tick
+// (the automatic ring-all) — both targeting the SAME agent for two
+// DIFFERENT customers — could both pass their own separate availability
+// read and both originate a real leg to the same softphone. Run in
+// isolation from the main round loop below (its own dedicated agent and
+// customers) so its assertion is unambiguous.
+async function testClaimRace() {
+    const raceAgentId = 90001;
+    fakeAgents.push({ id: raceAgentId, name: 'RaceAgent', sipUsername: 'raceagent', status: 'available' });
+
+    // Every other agent forced offline for the duration of this scenario —
+    // otherwise dequeueNext's own fan-out could target a different agent
+    // than the one claimQueuedCall is racing for, and the two calls
+    // wouldn't actually be contending for the same resource.
+    const others = fakeAgents.filter(a => a.id !== raceAgentId);
+    const prevStatuses = others.map(a => a.status);
+    others.forEach(a => (a.status = 'offline'));
+
+    const customerA = new FakeChannel('race-customer-a', '254700090001');
+    const customerB = new FakeChannel('race-customer-b', '254700090002');
+    await enterQueue(customerA, customerA.id);
+    await enterQueue(customerB, customerB.id);
+
+    const originateCountBefore = originateLog.length;
+    await Promise.all([claimQueuedCall(customerA.id, raceAgentId), tryDequeueNext()]);
+    const raceOriginations = originateLog.slice(originateCountBefore).filter(o => o.endpoint === 'PJSIP/raceagent');
+
+    others.forEach((a, i) => (a.status = prevStatuses[i]));
+
+    // Clean up whatever this scenario left behind so it can't pollute the
+    // main loop's own assertions below. This scenario deliberately never
+    // calls bridgeAgentLeg for the winning leg (it only tests the CAS at
+    // the claim step, not the full answer/bridge flow) — so, unlike a real
+    // hangup, closing the channel here does NOT run bridgeAgentLeg's own
+    // "delete agentLegBySessionId, then decide what to do" logic. Clearing
+    // that map entry directly is this test's job, not a real bug in
+    // bridgeAgentLeg (that path is exercised plenty elsewhere, in the main
+    // round loop below).
+    for (const [channelId, leg] of [...agentLegBySessionId.entries()]) {
+        if (leg.agentId === raceAgentId) agentLegBySessionId.delete(channelId);
+    }
+    for (const group of ringGroupBySessionId.values()) {
+        for (const sib of group) {
+            if (sib.agentId === raceAgentId) await sib.channel.hangup().catch(() => {});
+        }
+    }
+    for (const sessionId of [customerA.id, customerB.id]) {
+        const idx = waitingQueue.findIndex(w => w.sessionId === sessionId);
+        if (idx !== -1) waitingQueue.splice(idx, 1);
+    }
+    ringGroupBySessionId.delete(customerA.id);
+    ringGroupBySessionId.delete(customerB.id);
+    const raceAgentIndex = fakeAgents.findIndex(a => a.id === raceAgentId);
+    if (raceAgentIndex !== -1) fakeAgents.splice(raceAgentIndex, 1);
+
+    const problems = [];
+    if (raceOriginations.length > 1) {
+        problems.push(
+            `claimQueuedCall/dequeueNext race originated ${raceOriginations.length} legs to the same agent (raceagent) for two different customers — should be at most 1`
+        );
+    }
+    console.log(`Claim-race scenario: ${raceOriginations.length} leg(s) originated to the contested agent (expected: at most 1).`);
+    return problems;
+}
+
 // --- Simulation ----------------------------------------------------------
 
 async function main() {
     const numCustomers = Number(process.argv[2]) || 30;
     const numAgents = Number(process.argv[3]) || 4;
+    const answerFailureRate = process.argv[4] !== undefined ? Number(process.argv[4]) : 0;
 
-    __setTestClient(makeFakeClient());
+    __setTestClient(makeFakeClient({ answerFailureRate }));
 
     for (let i = 1; i <= numAgents; i++) {
         fakeAgents.push({ id: i, name: `Agent${i}`, sipUsername: `agent${i}`, status: 'available' });
     }
 
-    console.log(`Simulating ${numCustomers} customers against ${numAgents} agents...`);
+    console.log(`Simulating ${numCustomers} customers against ${numAgents} agents (answerFailureRate=${answerFailureRate})...`);
 
     const customerChannels = [];
     for (let i = 1; i <= numCustomers; i++) {
@@ -155,19 +250,22 @@ async function main() {
 
     // Real production never "finishes" — tryDequeueNext polls forever
     // (setInterval) and bridgeAgentLeg fires whenever a real StasisStart
-    // says an agent's leg actually answered, independently and continuously.
-    // A one-shot "dequeue a bunch, then answer a snapshot of what's ringing,
-    // then dequeue a bit more" sequence doesn't just simplify that — it
-    // creates orphans a real, continuously-running process would never
-    // leave behind: e.g. dequeueing customer B (once agents freed up from
-    // resolving customer A) after already taking the one snapshot of "what
-    // needs answering" leaves B's brand-new ring group with nothing left to
-    // ever resolve it, a bug in this simulation's own orchestration, not in
-    // ari-app. Alternating dequeue-to-a-fixed-point and answer-everything-
-    // currently-ringing, round after round, until nothing changes anymore,
-    // is what actually mirrors "runs forever" without literally waiting
-    // 3s x however many polls in real time.
-    const MAX_ROUNDS = numCustomers + numAgents + 5;
+    // says an agent's leg actually entered Stasis, independently and
+    // continuously. A one-shot "dequeue a bunch, then resolve a snapshot of
+    // what's ringing, then dequeue a bit more" sequence doesn't just
+    // simplify that — it creates orphans a real, continuously-running
+    // process would never leave behind: e.g. dequeueing customer B (once
+    // agents freed up from resolving customer A) after already taking the
+    // one snapshot of "what needs resolving" leaves B's brand-new ring
+    // group with nothing left to ever resolve it, a bug in this
+    // simulation's own orchestration, not in ari-app. Alternating
+    // dequeue-to-a-fixed-point and resolve-everything-currently-ringing,
+    // round after round, until nothing changes anymore, is what actually
+    // mirrors "runs forever" without literally waiting 3s x however many
+    // polls in real time. With answerFailureRate > 0, a round can now leave
+    // some sessions requeued rather than bridged — those get picked up
+    // fresh by the next round's dequeue pass, same as a real retry would.
+    const MAX_ROUNDS = (numCustomers + numAgents + 5) * (answerFailureRate > 0 ? 4 : 1);
     for (let round = 0; round < MAX_ROUNDS; round++) {
         let dequeuedSomething = false;
         for (let tick = 0; tick < numAgents + 1; tick++) {
@@ -180,18 +278,22 @@ async function main() {
         for (const sessionId of sessionIdsWithRingers) {
             const ringGroup = ringGroupBySessionId.get(sessionId) || [];
             // Simultaneous-answer race: every member of a ring group
-            // "answers" at once (Promise.all, not sequential) — exactly the
+            // resolves at once (Promise.all, not sequential) — exactly the
             // race claimedSessions exists to guard against, deliberately
             // forced here every round instead of hoping it happens under
-            // real timing.
+            // real timing. With answerFailureRate > 0, some of these
+            // resolve by throwing instead of succeeding — exercising the
+            // last-surviving-leg/no-double-requeue logic in bridgeAgentLeg.
             await Promise.all(ringGroup.map(({ channel, agentId }) => bridgeAgentLeg(channel, agentId, sessionId)));
         }
 
         if (!dequeuedSomething && sessionIdsWithRingers.length === 0) break; // fixed point reached
     }
 
+    const claimRaceProblems = await testClaimRace();
+
     // --- Assertions -----------------------------------------------------
-    const problems = [];
+    const problems = [...claimRaceProblems];
 
     const bridgedCount = callLogWrites.filter(r => r.status === 'ongoing').length;
     console.log(`Bridged: ${bridgedCount} / ${numCustomers} customers`);
@@ -216,13 +318,35 @@ async function main() {
     if (agentLegBySessionId.size > 0) problems.push(`${agentLegBySessionId.size} stale agentLegBySessionId entr(y/ies) left behind`);
 
     // A customer who never got bridged (more customers than agents, by
-    // design in the default numCustomers > numAgents run) should still be
+    // design in the default numCustomers > numAgents run, or — with
+    // answerFailureRate > 0 — simply unlucky every round) should still be
     // sitting in waitingQueue, not lost — never bridged is fine; vanished
     // silently is not.
     const unbridgedCustomers = numCustomers - bridgedCount;
     if (waitingQueue.length !== unbridgedCustomers) {
         problems.push(`${unbridgedCustomers} customer(s) never bridged, but waitingQueue only has ${waitingQueue.length} — someone got lost, not just left waiting`);
     }
+
+    // The specific failure mode the bridgeAgentLeg redesign has to avoid:
+    // a customer requeued more than once (double-counted in waitingQueue),
+    // or requeued AND bridged at the same time (served twice).
+    const waitingSessionIds = waitingQueue.map(w => w.sessionId);
+    const duplicateWaiting = waitingSessionIds.filter((id, i) => waitingSessionIds.indexOf(id) !== i);
+    if (duplicateWaiting.length > 0) {
+        problems.push(`Session(s) duplicated in waitingQueue: ${[...new Set(duplicateWaiting)].join(', ')}`);
+    }
+    const bridgedAndWaiting = waitingSessionIds.filter(id => bridgedSessionIds.includes(id));
+    if (bridgedAndWaiting.length > 0) {
+        problems.push(`Session(s) both bridged AND still in waitingQueue: ${[...new Set(bridgedAndWaiting)].join(', ')}`);
+    }
+
+    // Every CAS'd setAgentStatus call that lost its race (applied: false)
+    // should never have been for a plain 'ringing'->'available' revert
+    // colliding with itself in a way that left an agent permanently
+    // stranded — a sanity check that lost-race entries stayed rare relative
+    // to total status writes, not a sign something is thrashing.
+    const lostRaces = agentStatusLog.filter(e => e.expectedStatus && !e.applied);
+    console.log(`Status writes: ${agentStatusLog.length} total, ${lostRaces.length} lost a CAS race (expected during genuine concurrency, not itself a problem).`);
 
     console.log(problems.length === 0 ? '\n✅ No problems found.' : `\n❌ ${problems.length} problem(s):\n- ${problems.join('\n- ')}`);
     process.exit(problems.length === 0 ? 0 : 1);

@@ -82,9 +82,26 @@ async function getAvailableAgentsWithSip() {
     return data.filter(a => a.agent_sip_credentials?.sip_username);
 }
 
-async function setAgentStatus(agentId, status) {
-    const { error } = await supabase.from('agents').update({ status }).eq('id', agentId);
-    if (error) console.error('❌ Failed to update agent status:', error.message);
+// `expectedStatus`, when given, turns this into a compare-and-swap: the
+// UPDATE's own WHERE clause requires the row to still be at that status, so
+// Postgres — not this process — decides who wins when two callers race to
+// move the SAME agent out of the SAME expected status (mirrors the atomic
+// UPDATE...WHERE...RETURNING pattern claimAddPartyRequests already uses
+// elsewhere in this file). Returns whether this call's write actually took
+// effect: without expectedStatus that's just "did the request itself
+// succeed" (matches every pre-existing call site's behavior exactly); with
+// it, `false` means some other write already moved the agent's status out
+// from under this one, and the caller must not treat the agent as
+// claimed/reverted by its own call.
+async function setAgentStatus(agentId, status, expectedStatus = null) {
+    let query = supabase.from('agents').update({ status }).eq('id', agentId);
+    if (expectedStatus) query = query.eq('status', expectedStatus);
+    const { data, error } = await query.select('id');
+    if (error) {
+        console.error('❌ Failed to update agent status:', error.message);
+        return false;
+    }
+    return (data ?? []).length > 0;
 }
 
 async function getAgentPhone(agentId) {
