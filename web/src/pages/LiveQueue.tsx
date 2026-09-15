@@ -33,7 +33,12 @@ export default function LiveQueue() {
     const showToast = useToast();
     const queryClient = useQueryClient();
     const [pendingClear, setPendingClear] = useState<QueuedCall | null>(null);
-    const [claimingSessionId, setClaimingSessionId] = useState<string | null>(null);
+    // A Set, not a single id — claimCall's mutation allows concurrent
+    // mutate() calls, and a scalar here let a second "Pick up" click (on a
+    // different row) reset the tracker and silently re-enable the FIRST
+    // row's button while its own claim request was still in flight,
+    // letting that click fire a second, duplicate claim for the same call.
+    const [claimingSessionIds, setClaimingSessionIds] = useState<Set<string>>(new Set());
 
     // Same busy-guard startOutgoingCall already applies before placing a
     // call — claiming while on/ringing another call would try to originate
@@ -96,11 +101,17 @@ export default function LiveQueue() {
             queryClient.invalidateQueries({ queryKey: ['queue'] });
         },
         onError: (err: unknown) => showToast(errorMessage(err), 'error'),
-        onSettled: () => setClaimingSessionId(null)
+        onSettled: (_data, _err, sessionId) => {
+            setClaimingSessionIds(prev => {
+                const next = new Set(prev);
+                next.delete(sessionId);
+                return next;
+            });
+        }
     });
 
     function handleClaim(call: QueuedCall) {
-        setClaimingSessionId(call.session_id);
+        setClaimingSessionIds(prev => new Set(prev).add(call.session_id));
         claimCall.mutate(call.session_id);
     }
 
@@ -158,7 +169,7 @@ export default function LiveQueue() {
                                     {call.stage === 'Waiting' && (
                                         <button
                                             className="btn btn-link"
-                                            disabled={!canClaim || claimingSessionId === call.session_id}
+                                            disabled={!canClaim || claimingSessionIds.has(call.session_id)}
                                             title={canClaim ? undefined : "You're not available to take calls right now"}
                                             onClick={() => handleClaim(call)}
                                         >

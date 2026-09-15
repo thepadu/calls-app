@@ -1,5 +1,6 @@
 const { createClient } = require('@supabase/supabase-js');
 const ws = require('ws');
+const { GHOST_AGENT_STALE_MS } = require('../shared/constants');
 
 // supabase-js instantiates a Realtime client unconditionally (even though
 // this app never subscribes to anything), which needs a WebSocket
@@ -136,20 +137,29 @@ async function getAgentSipCredentials(agentId) {
 // (the closest semantic fit of the four already in the schema; there's no
 // dedicated "nobody logged in" condition) rather than adding a new one.
 async function getNoAgentsForwardingDestination() {
-    const { data: config } = await supabase.from('forwarding_config').select('enabled').eq('id', 1).maybeSingle();
+    const { data: config, error: configError } = await supabase.from('forwarding_config').select('enabled').eq('id', 1).maybeSingle();
+    if (configError) {
+        console.error('❌ Failed to load forwarding_config:', configError.message);
+        return null;
+    }
     if (!config?.enabled) return null;
 
     // Ordered defensively even though `condition` is now unique
     // (migration 018) — picks the most recently set one rather than an
     // arbitrary row if this ever runs against a database from before that
     // constraint existed.
-    const { data: rule } = await supabase
+    const { data: rule, error: ruleError } = await supabase
         .from('forwarding_rules')
         .select('destination')
         .eq('condition', 'no_answer')
         .order('created_at', { ascending: false })
         .limit(1)
         .maybeSingle();
+
+    if (ruleError) {
+        console.error('❌ Failed to load forwarding_rules:', ruleError.message);
+        return null;
+    }
 
     return rule?.destination ?? null;
 }
@@ -405,8 +415,11 @@ async function reconcileStaleAgentsOnStartup() {
 // flipped back to offline. Scoped to agents with SIP credentials only:
 // agents still on the old real-phone-ring flow don't run a browser
 // heartbeat at all, and "available" legitimately doesn't require one for them.
-const GHOST_AGENT_STALE_MS = 90 * 1000;
-
+// 'break' is included too — an agent who steps away and then crashes/closes
+// their laptop with no clean logout has no live call to explain a stale
+// heartbeat, unlike 'on_call' (deliberately excluded below: a real on-call
+// agent's heartbeat legitimately goes stale while their softphone tab is
+// busy with a call, not because they left).
 async function reconcileGhostAgents() {
     // Compared as epoch millis, not raw strings — Postgres/PostgREST's
     // "+00:00" suffix and JS's own toISOString() "Z" suffix don't sort
@@ -416,11 +429,16 @@ async function reconcileGhostAgents() {
     const { data, error } = await supabase
         .from('agents')
         .select('id, last_seen_at, agent_sip_credentials(sip_username)')
-        .in('status', ['available', 'ringing']);
+        .in('status', ['available', 'ringing', 'break']);
 
     if (error) {
         console.error('❌ Failed to check for ghost agents:', error.message);
-        return 0;
+        // Was `return 0;` — every success path below returns an array, so
+        // this numeric mismatch made the caller's `staleIds.length === 0`
+        // check silently skip (`(0).length` is `undefined`) and then throw
+        // trying to `for...of` a number, masking this very error with a
+        // confusing generic one instead of surfacing it.
+        return [];
     }
 
     const staleIds = data

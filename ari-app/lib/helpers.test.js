@@ -77,6 +77,43 @@ describe('isWithinBusinessHours', () => {
         vi.setSystemTime(new Date('2026-09-05T06:00:00Z')); // Saturday, 09:00 EAT
         expect(isWithinBusinessHours(weekdayHours)).toBe(false);
     });
+
+    // An overnight schedule (close time <= open time by clock value) used to
+    // never match at all — `minutesNow >= openMinutes && minutesNow < closeMinutes`
+    // can't be true for any minute of the day once openMinutes > closeMinutes.
+    // active_days covers every day here so these cases isolate the
+    // open/close wraparound logic from the separate day-of-week check.
+    const overnightHours = { active_days: [0, 1, 2, 3, 4, 5, 6], open_time: '20:00', close_time: '02:00' };
+
+    it('is open at 23:00 EAT, in the evening portion of an overnight schedule', () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-09-07T20:00:00Z')); // 23:00 EAT
+        expect(isWithinBusinessHours(overnightHours)).toBe(true);
+    });
+
+    it('is open at 01:00 EAT, in the past-midnight portion of an overnight schedule', () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-09-07T22:00:00Z')); // 01:00 EAT the next day
+        expect(isWithinBusinessHours(overnightHours)).toBe(true);
+    });
+
+    it('is closed at 19:59 EAT, one minute before an overnight schedule opens', () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-09-07T16:59:00Z')); // 19:59 EAT
+        expect(isWithinBusinessHours(overnightHours)).toBe(false);
+    });
+
+    it('is closed exactly at closing time on an overnight schedule, not one minute after', () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-09-07T23:00:00Z')); // 02:00 EAT exactly
+        expect(isWithinBusinessHours(overnightHours)).toBe(false);
+    });
+
+    it('is closed at midday on an overnight schedule', () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-09-07T09:00:00Z')); // 12:00 EAT
+        expect(isWithinBusinessHours(overnightHours)).toBe(false);
+    });
 });
 
 describe('parseSipUsername', () => {

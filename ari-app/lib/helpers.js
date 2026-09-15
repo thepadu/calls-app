@@ -34,6 +34,13 @@ function safeEqual(a, b) {
 
 // Kenya has a single timezone with no DST (EAT, UTC+3) — not worth a tz
 // library dependency for that. active_days is 0=Sunday..6=Saturday.
+//
+// Note on an overnight schedule (e.g. open 20:00, close 02:00): the
+// active_days check below still uses the *current* calendar day, not the
+// day the shift started on — so for the portion after midnight, it's
+// tomorrow's entry in active_days that has to be set for this to read as
+// open, not today's. A "Monday night through Tuesday early morning" shift
+// needs both Monday and Tuesday checked, not just Monday.
 function isWithinBusinessHours(hours) {
     const nairobiNow = new Date(Date.now() + 3 * 60 * 60 * 1000);
     const day = nairobiNow.getUTCDay();
@@ -45,6 +52,13 @@ function isWithinBusinessHours(hours) {
     const openMinutes = openH * 60 + openM;
     const closeMinutes = closeH * 60 + closeM;
 
+    // A schedule where closing is at or before opening (by clock time) is
+    // an overnight span — e.g. open 20:00/close 02:00 means "open" is
+    // actually [20:00, 24:00) union [00:00, 02:00), not the empty range a
+    // plain `>= open && < close` would always evaluate to.
+    if (closeMinutes <= openMinutes) {
+        return minutesNow >= openMinutes || minutesNow < closeMinutes;
+    }
     return minutesNow >= openMinutes && minutesNow < closeMinutes;
 }
 

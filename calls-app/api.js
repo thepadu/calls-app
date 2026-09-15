@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const multer = require('multer');
 const { isValidE164, normalizePhone } = require('./lib/phone');
+const { escapeLikePattern } = require('./lib/text');
 
 // Memory storage, not disk — the file only ever needs to exist long enough
 // to be forwarded to ari-app as a base64 body (see setHoldMusicOnAsterisk);
@@ -200,11 +201,11 @@ async function claimCallOnAsterisk(sessionId, agentId) {
     }
 }
 
-// Must match ari-app/supabase.js's GHOST_AGENT_STALE_MS — this is only used
-// to keep the topbar's "N agents live" count from overcounting a dead tab
-// during the window before that sweep flips it back to offline, not to
+// Shared with ari-app/supabase.js via ../shared/constants.js — this is only
+// used to keep the topbar's "N agents live" count from overcounting a dead
+// tab during the window before that sweep flips it back to offline, not to
 // enforce staleness itself (ari-app owns that).
-const GHOST_AGENT_STALE_MS = 90 * 1000;
+const { GHOST_AGENT_STALE_MS } = require('../shared/constants');
 
 // JSON API for the React web app (/web). Mirrors the data shown on the old
 // HTML dashboard (dashboard.js, now removed) but as JSON instead of rendered
@@ -300,6 +301,14 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         return result;
     }
 
+    // Distinguishes "you asked for something that can never succeed"
+    // (should surface as 400/409 to the client) from a genuine upstream
+    // failure (Supabase down, network blip — stays 502). Before this, both
+    // collapsed into the same catch block at every call site and always
+    // came back as 502, which monitoring conventionally reads as "retry
+    // later" — useless advice for a precondition that retrying can't fix.
+    class PreconditionError extends Error {}
+
     // Going "available" just flips the DB flag — the ARI app rings this
     // agent's *browser* directly the moment it sees status='available'. An
     // agent with no row in agent_sip_credentials has no browser softphone to
@@ -320,7 +329,7 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
             .maybeSingle();
 
         if (!sipCreds) {
-            throw new Error('No softphone set up for your account yet — ask a supervisor to provision one before going available');
+            throw new PreconditionError('No softphone set up for your account yet — ask a supervisor to provision one before going available');
         }
 
         return updateAgentStatus(agent.id, { status: 'available' });
@@ -330,7 +339,7 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         res.json({ user: req.user });
     });
 
-    // GET /api/calls?tab=all|incoming|outgoing|missed&option=&status=&ticket=&caller=&from=&to=
+    // GET /api/calls?tab=all|incoming|outgoing|missed&option=&status=&caller=&from=&to=
     // GET /api/calls?tab=...&page=1&pageSize=50 — tab/isAgentLegRow filtering
     // happens in JS (see below), so pagination is applied after that rather
     // than via a SQL .range(), which would need every one of those filters
@@ -340,7 +349,7 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
     // call_logs grows enough that a 2000-row fetch itself becomes the
     // bottleneck (see SYSTEM_DESIGN.md).
     app.get('/api/calls', requireAuth, async (req, res) => {
-        const { tab, to, option, status, ticket, caller } = req.query;
+        const { tab, to, option, status, caller } = req.query;
         const page = Math.max(1, parseInt(req.query.page, 10) || 1);
         const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize, 10) || 50));
 
@@ -361,8 +370,7 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         if (to) query = query.lte('created_at', `${to}T23:59:59`);
         if (option) query = query.eq('option_pressed', option);
         if (status) query = query.eq('status', status);
-        if (ticket) query = query.eq('ticket_status', ticket);
-        if (caller) query = query.ilike('caller', `%${caller}%`);
+        if (caller) query = query.ilike('caller', `%${escapeLikePattern(caller)}%`);
 
         const { data, error } = await query;
 
@@ -783,7 +791,7 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
 
         const agentQuery = req.user.agentId
             ? supabase.from('agents').select().eq('id', req.user.agentId)
-            : supabase.from('agents').select().ilike('email', req.user.email);
+            : supabase.from('agents').select().ilike('email', escapeLikePattern(req.user.email));
         const { data: agent, error: lookupError } = await agentQuery.maybeSingle();
 
         if (lookupError || !agent) {
@@ -795,7 +803,10 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
             if (error) throw new Error(error.message);
             res.json({ agent: data });
         } catch (err) {
-            res.status(502).json({ error: err.message });
+            // A PreconditionError (e.g. no softphone provisioned yet) is a
+            // client-side mistake retrying can't fix — 400, not 502, which
+            // monitoring would otherwise read as "upstream is down, retry."
+            res.status(err instanceof PreconditionError ? 400 : 502).json({ error: err.message });
         }
     });
 
@@ -815,7 +826,7 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         // every ~90s, since nothing was ever refreshing last_seen_at.
         const query = req.user.agentId
             ? supabase.from('agents').update({ last_seen_at: new Date().toISOString() }).eq('id', req.user.agentId)
-            : supabase.from('agents').update({ last_seen_at: new Date().toISOString() }).ilike('email', req.user.email);
+            : supabase.from('agents').update({ last_seen_at: new Date().toISOString() }).ilike('email', escapeLikePattern(req.user.email));
         const { error } = await query;
 
         if (error) {
@@ -917,7 +928,7 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
     app.get('/api/agents/me/active-call', requireAuth, async (req, res) => {
         const agentQuery = req.user.agentId
             ? supabase.from('agents').select('phone, status').eq('id', req.user.agentId)
-            : supabase.from('agents').select('phone, status').ilike('email', req.user.email);
+            : supabase.from('agents').select('phone, status').ilike('email', escapeLikePattern(req.user.email));
         const { data: agent } = await agentQuery.maybeSingle();
 
         if (!agent) {
@@ -970,6 +981,60 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         res.json({ call: call ?? null, agentStatus: agent.status });
     });
 
+    // Lets an agent end their own call when the softphone side has nothing
+    // to hang up with — e.g. after a page refresh mid-call, or while the
+    // SIP session is mid-reconnect and briefly reports no active call even
+    // though the real call is still live server-side (see CallScreen.tsx's
+    // "active" phase derived from the poll alone). Reuses the same
+    // hangupCallOnAsterisk the supervisor's mark-failed action uses — this
+    // always attempts a real hangup, never just a database correction.
+    app.post('/api/agents/me/active-call/hangup', requireAuth, async (req, res) => {
+        const agentQuery = req.user.agentId
+            ? supabase.from('agents').select('phone').eq('id', req.user.agentId)
+            : supabase.from('agents').select('phone').ilike('email', escapeLikePattern(req.user.email));
+        const { data: agent } = await agentQuery.maybeSingle();
+        if (!agent) {
+            return res.status(404).json({ error: 'No agent record linked to your account yet' });
+        }
+
+        // Same agent_id-first, agent_number-fallback matching as GET
+        // /api/agents/me/active-call above.
+        let call = null;
+        if (req.user.agentId) {
+            const { data } = await supabase
+                .from('call_logs')
+                .select('session_id')
+                .eq('agent_id', req.user.agentId)
+                .in('status', ['ongoing', 'dialing'])
+                .order('created_at', { ascending: false })
+                .limit(1)
+                .maybeSingle();
+            call = data;
+        }
+        if (!call && agent.phone) {
+            const { data } = await supabase
+                .from('call_logs')
+                .select('session_id')
+                .in('agent_number', [agent.phone, normalizePhone(agent.phone)])
+                .in('status', ['ongoing', 'dialing'])
+                .order('created_at', { ascending: false })
+                .limit(1)
+                .maybeSingle();
+            call = data;
+        }
+
+        if (!call) {
+            return res.status(404).json({ error: 'No active call to end' });
+        }
+
+        const hangupResult = await hangupCallOnAsterisk(call.session_id);
+        if (!hangupResult.reachable) {
+            return res.status(502).json({ error: "Couldn't reach the phone system to end this call — try again shortly" });
+        }
+
+        res.json({ ok: true, hungUp: hangupResult.hungUp });
+    });
+
     // Blind-add-a-party MVP: ari-app has no HTTP server of its own, so these
     // two columns on the agent's own ongoing call_logs row are the only way
     // to signal a live call in progress — ari-app's poll loop claims
@@ -989,7 +1054,7 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
 
         const agentQuery = req.user.agentId
             ? supabase.from('agents').select('phone').eq('id', req.user.agentId)
-            : supabase.from('agents').select('phone').ilike('email', req.user.email);
+            : supabase.from('agents').select('phone').ilike('email', escapeLikePattern(req.user.email));
         const { data: agent } = await agentQuery.maybeSingle();
         if (!agent) {
             return res.status(404).json({ error: 'Agent not found' });
@@ -1062,7 +1127,7 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
     app.get('/api/agents/me/sip-credentials', requireAuth, async (req, res) => {
         const agentQuery = req.user.agentId
             ? supabase.from('agents').select('id').eq('id', req.user.agentId)
-            : supabase.from('agents').select('id').ilike('email', req.user.email);
+            : supabase.from('agents').select('id').ilike('email', escapeLikePattern(req.user.email));
         const { data: agent } = await agentQuery.maybeSingle();
 
         if (!agent) {
@@ -1181,7 +1246,11 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
     });
 
     app.patch('/api/agents/:id', requireSupervisor, async (req, res) => {
-        const { id } = req.params;
+        const id = parseInt(req.params.id, 10);
+        if (!Number.isInteger(id)) {
+            return res.status(400).json({ error: 'Invalid agent id' });
+        }
+
         const { name, phone, email, status, role } = req.body;
 
         if (phone !== undefined && !isValidE164(phone)) {
@@ -1226,7 +1295,7 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
                 if (error) throw new Error(error.message);
                 agent = data;
             } catch (err) {
-                return res.status(502).json({ error: err.message });
+                return res.status(err instanceof PreconditionError ? 400 : 502).json({ error: err.message });
             }
         }
 
@@ -1606,7 +1675,7 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
                 tag: tag || null,
                 priority: priority || 'Medium',
                 status: status || 'Open',
-                assigned_agent_id: assigned_agent_id || null,
+                assigned_agent_id: assigned_agent_id ?? null,
                 notes: notes || null
             })
             .select()
@@ -1621,6 +1690,11 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
     });
 
     app.patch('/api/tickets/:id', requireAuth, async (req, res) => {
+        const ticketId = parseInt(req.params.id, 10);
+        if (!Number.isInteger(ticketId)) {
+            return res.status(400).json({ error: 'Invalid ticket id' });
+        }
+
         const { status, priority, tag, assigned_agent_id, notes } = req.body;
 
         const validStatuses = ['Open', 'Resolved', 'Escalated', 'Follow-up needed', 'No resolution'];
@@ -1649,7 +1723,7 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         if (assigned_agent_id !== undefined) updates.assigned_agent_id = assigned_agent_id;
         if (notes !== undefined) updates.notes = notes;
 
-        const { data, error } = await supabase.from('tickets').update(updates).eq('id', req.params.id).select().single();
+        const { data, error } = await supabase.from('tickets').update(updates).eq('id', ticketId).select().single();
 
         if (error) {
             console.error(error);
@@ -1963,7 +2037,7 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
     app.post('/api/queue/:sessionId/claim', requireAuth, async (req, res) => {
         const agentQuery = req.user.agentId
             ? supabase.from('agents').select('id').eq('id', req.user.agentId)
-            : supabase.from('agents').select('id').ilike('email', req.user.email);
+            : supabase.from('agents').select('id').ilike('email', escapeLikePattern(req.user.email));
         const { data: agent, error: lookupError } = await agentQuery.maybeSingle();
 
         if (lookupError || !agent) {

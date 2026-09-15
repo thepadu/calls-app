@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const express = require('express');
 const helmet = require('helmet');
 const cookieParser = require('cookie-parser');
@@ -100,12 +101,28 @@ const { requireAuth, requireSupervisor } = authRoutes(app, supabase);
 // on requires adding `?secret=...` there too, which isn't something this
 // code can do on its own.
 const AT_WEBHOOK_SECRET = process.env.AT_WEBHOOK_SECRET;
+
+// Constant-time comparison — a plain !== leaks timing info proportional to
+// how many leading characters match, and this endpoint is reachable from
+// the public internet with a generous rate limit (webhookLimiter, below)
+// specifically so a real Africa's Talking retry storm during an incident
+// never gets throttled — which also gives an attacker plenty of budget to
+// use response-time variance to guess the secret byte-by-byte instead of
+// brute-forcing it outright. crypto.timingSafeEqual throws on mismatched
+// buffer lengths, so the length check has to happen first, not be replaced
+// by it.
+function safeEqual(a, b) {
+    const bufA = Buffer.from(String(a ?? ''));
+    const bufB = Buffer.from(String(b ?? ''));
+    return bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
+}
+
 function verifyAtWebhookSecret(req, res, next) {
     if (!AT_WEBHOOK_SECRET) {
         console.warn(`⚠️  AT_WEBHOOK_SECRET not set — ${req.path} is reachable without authentication`);
         return next();
     }
-    if (req.query.secret !== AT_WEBHOOK_SECRET) {
+    if (!safeEqual(req.query.secret, AT_WEBHOOK_SECRET)) {
         return res.status(403).send('Forbidden');
     }
     next();

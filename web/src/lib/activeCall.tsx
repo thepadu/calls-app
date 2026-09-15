@@ -53,9 +53,16 @@ export function ActiveCallProvider({ children }: { children: ReactNode }) {
     const agentStatus: string | null = data?.agentStatus ?? null;
     const isOnCall = agentStatus === 'on_call';
 
+    // Guarded on !justEnded — without this, a new call answered while the
+    // previous call's wrap-up prompt was still open silently reassigned
+    // `lastCall` (and therefore WrapUpModal/TicketDrawer) to the NEW call,
+    // relabeling the still-open prompt mid-flight and, if submitted,
+    // attaching the wrap-up ticket to the wrong caller entirely. Once the
+    // agent dismisses/finishes that wrap-up, justEnded goes false and the
+    // next real activeCall change updates lastCall normally again.
     useEffect(() => {
-        if (activeCall) setLastCall(activeCall);
-    }, [activeCall]);
+        if (activeCall && !justEnded) setLastCall(activeCall);
+    }, [activeCall, justEnded]);
 
     useEffect(() => {
         if (wasOnCall.current && !isOnCall) setJustEnded(true);

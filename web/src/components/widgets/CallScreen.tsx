@@ -139,7 +139,8 @@ export default function CallScreen() {
         hangup,
         audioOutputSupported,
         speakerOn,
-        toggleSpeaker
+        toggleSpeaker,
+        forceLocalReset
     } = useSoftphone();
     const { activeCall: polledCall, openQuickTicket, quickTicketOpen } = useActiveCall();
     const hasGestured = useHasUserGestured();
@@ -182,6 +183,18 @@ export default function CallScreen() {
         onError: (err: unknown) => showToast(err instanceof Error ? err.message : 'Failed to add party', 'error')
     });
 
+    // Backstop for when the call screen is showing "active" purely from the
+    // server poll (softphoneCall is null — see the phase/activeCaller
+    // comment below) — e.g. a page refresh mid-call, or a SIP reconnect
+    // cycle that briefly tears the local session down. Without this, every
+    // other control on this screen is gated on softphoneCall and the agent
+    // has no way to end the call at all until the far end hangs up.
+    const forceEndActiveCall = useMutation({
+        mutationFn: () => apiFetch('/api/agents/me/active-call/hangup', { method: 'POST' }),
+        onSuccess: () => queryClient.invalidateQueries({ queryKey: ['active-call'] }),
+        onError: (err: unknown) => showToast(err instanceof Error ? err.message : 'Failed to end call', 'error')
+    });
+
     function submitAddParty() {
         // The button already disables on isPending, but Enter in the input
         // field calls this directly with no such guard — without this,
@@ -217,6 +230,24 @@ export default function CallScreen() {
     // Precedence matches the old banners' own rule (OutgoingCallBanner hid
     // itself if an incomingCall was somehow ringing at the same instant).
     const phase = incomingCall ? 'incoming' : outgoingCall ? 'outgoing' : activeCaller ? 'active' : null;
+
+    // `phase === 'active'` with no softphoneCall means we're relying purely
+    // on the server poll — either a brief, self-resolving gap right after
+    // answering, or a genuinely stuck local session (page refresh, a SIP
+    // reconnect that hasn't finished). Kick off one reconnect attempt per
+    // such episode rather than leaving the agent on a screen with no live
+    // local session and nothing trying to fix it.
+    const triedReconnectRef = useRef(false);
+    useEffect(() => {
+        if (phase === 'active' && !softphoneCall) {
+            if (!triedReconnectRef.current) {
+                triedReconnectRef.current = true;
+                forceLocalReset();
+            }
+        } else {
+            triedReconnectRef.current = false;
+        }
+    }, [phase, softphoneCall, forceLocalReset]);
 
     // Only the 'incoming' phase gets a role="alert" live region below —
     // 'active' (connected) and the call ending had no screen-reader
@@ -275,6 +306,9 @@ export default function CallScreen() {
                     {phase === 'incoming' && 'Incoming call…'}
                     {phase === 'outgoing' && 'Calling…'}
                     {phase === 'active' && <span className="call-screen-timer">{formatDuration(seconds)}</span>}
+                    {phase === 'active' && !softphoneCall && (
+                        <span className="call-screen-reconnecting"> — reconnecting your phone…</span>
+                    )}
                 </div>
                 {phase === 'active' && addPartyStatus && (
                     <div className={`call-screen-add-party-status ${addPartyStatus === 'failed' ? 'call-screen-add-party-failed' : ''}`}>
@@ -360,8 +394,22 @@ export default function CallScreen() {
                                 className="call-screen-add-party-input"
                             />
                         )}
-                        {softphoneCall && (
+                        {softphoneCall ? (
                             <button className="call-screen-round-btn call-screen-btn-end" onClick={hangup} aria-label="End call">
+                                <PhoneOff size={26} />
+                            </button>
+                        ) : (
+                            // No local SIP session to hang up — this is the
+                            // one control that must still work while
+                            // reconnecting, via a real server-side hangup
+                            // rather than the local softphone.hangup().
+                            <button
+                                className="call-screen-round-btn call-screen-btn-end"
+                                onClick={() => forceEndActiveCall.mutate()}
+                                disabled={forceEndActiveCall.isPending}
+                                aria-label="End call"
+                                title="Your softphone isn't connected right now — this ends the call directly"
+                            >
                                 <PhoneOff size={26} />
                             </button>
                         )}

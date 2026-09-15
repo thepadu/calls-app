@@ -77,7 +77,13 @@ function BusinessHoursPanel() {
             setConfirmingEnable(true);
         } else {
             setForm({ ...form, enabled: false });
-            save.mutate({ enabled: false });
+            // Rolls the optimistic flip back on a failed save — without
+            // this, a failed PATCH left the toggle showing the new (wrong)
+            // state indefinitely, since nothing else re-syncs `form` until
+            // an unrelated refetch happens to overwrite it. Mirrors
+            // IvrEditor's toggleMenuEnabled, adapted for `enabled` being one
+            // field of a larger form object rather than its own state.
+            save.mutate({ enabled: false }, { onError: () => setForm(current => (current ? { ...current, enabled: true } : current)) });
         }
     }
 
@@ -125,7 +131,7 @@ function BusinessHoursPanel() {
                 confirmLabel="Turn on"
                 onConfirm={() => {
                     setForm({ ...form, enabled: true });
-                    save.mutate({ enabled: true });
+                    save.mutate({ enabled: true }, { onError: () => setForm(current => (current ? { ...current, enabled: false } : current)) });
                     setConfirmingEnable(false);
                 }}
                 onCancel={() => setConfirmingEnable(false)}

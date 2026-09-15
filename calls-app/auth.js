@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const { OAuth2Client } = require('google-auth-library');
 const jwt = require('jsonwebtoken');
+const { escapeLikePattern } = require('./lib/text');
 
 // 24h instead of a flat 7 days — shrinks the blast radius of a leaked
 // cookie considerably. Sliding rather than fixed so a genuinely active
@@ -342,11 +343,21 @@ module.exports = function (app, supabase) {
             // itself stays open to anyone, per the policy above. `agentId`
             // (when present) is how the frontend matches "my performance"
             // out of the agent-stats list without a separate lookup.
-            let { data: agent } = await supabase
+            let { data: agent, error: lookupError } = await supabase
                 .from('agents')
                 .select('id, role')
-                .ilike('email', loginEmail)
+                .ilike('email', escapeLikePattern(loginEmail))
                 .maybeSingle();
+
+            // A genuine DB error here must not fall through to "treat as a
+            // brand-new login" below — that branch upserts a fresh roster
+            // row, which for a real returning agent means creating exactly
+            // the kind of silent duplicate the comment above this function
+            // already describes fixing once, just from a different cause.
+            if (lookupError) {
+                console.error('❌ Failed to look up agent by email during login:', lookupError.message);
+                return res.redirect('/login?error=auth_failed');
+            }
 
             // First time this email has ever logged in — create their roster
             // row now, so a supervisor actually has someone to see/promote.
@@ -409,15 +420,29 @@ module.exports = function (app, supabase) {
                 // demoted via the roster UI would keep re-authorizing as
                 // supervisor for up to another 24h of activity, since
                 // nothing else ever re-reads their role after login.
-                const { data: agent } = await supabase
+                const { data: agent, error: lookupError } = await supabase
                     .from('agents')
                     .select('id, role')
-                    .ilike('email', payload.email)
+                    .ilike('email', escapeLikePattern(payload.email))
                     .maybeSingle();
-                const role = agent?.role === 'supervisor' ? 'supervisor' : 'agent';
-                const agentId = agent?.id ?? null;
-                issueSession(res, { email: payload.email, name: payload.name, role, agentId });
-                req.user = { ...payload, role, agentId };
+
+                if (lookupError) {
+                    // A transient DB error here must not silently demote an
+                    // active supervisor to 'agent' for the rest of this
+                    // session — `agent` would come back undefined, and
+                    // `agent?.role === 'supervisor' ? ... : 'agent'` can't
+                    // tell "genuinely not a supervisor" apart from "the
+                    // lookup itself failed." Skip this refresh cycle
+                    // entirely (keeping the existing, still-valid session)
+                    // rather than act on data we don't trust — it retries
+                    // again on the next request past SESSION_REFRESH_AFTER_MS.
+                    console.error('❌ Failed to refresh agent role during session refresh:', lookupError.message);
+                } else {
+                    const role = agent?.role === 'supervisor' ? 'supervisor' : 'agent';
+                    const agentId = agent?.id ?? null;
+                    issueSession(res, { email: payload.email, name: payload.name, role, agentId });
+                    req.user = { ...payload, role, agentId };
+                }
             }
 
             next();
