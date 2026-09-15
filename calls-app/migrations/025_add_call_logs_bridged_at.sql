@@ -1,0 +1,11 @@
+-- Run in the Supabase SQL editor. Idempotent (safe to re-run).
+--
+-- call_logs had no timestamp distinguishing "row created" (created_at, set
+-- once at IVR entry / outbound dial) from "call actually bridged to an
+-- agent" — sweepStaleCalls's "ongoing too long" check used to measure from
+-- created_at, so a customer who waited a while in the queue before an
+-- agent answered could have their genuinely-live, still-ongoing call
+-- incorrectly swept and marked 'failed' well before it was actually stale.
+-- ari-app/index.js now stamps this the moment a call bridges (both the
+-- inbound and outbound paths).
+alter table call_logs add column if not exists bridged_at timestamptz;

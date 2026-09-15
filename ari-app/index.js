@@ -1131,7 +1131,6 @@ async function bridgeAgentLeg(agentChannel, agentId, customerSessionId) {
         await bridge.addChannel({ channel: [customerChannel.id, agentChannel.id] });
 
         state.startedAt = Date.now();
-        await setAgentStatus(agentId, 'on_call');
         // agent_id is the reliable identifier — agent_number (kept for
         // backward compatibility with rows/code that still read it) is
         // matched against agents.phone, which is null for every agent
@@ -1139,7 +1138,23 @@ async function bridgeAgentLeg(agentChannel, agentId, customerSessionId) {
         // real agents), silently breaking their attribution, their own
         // active-call lookup, and their stats entirely.
         const agentPhone = await getAgentPhone(agentId);
-        await upsertCallLog({ session_id: customerSessionId, status: 'ongoing', agent_id: agentId, agent_number: agentPhone });
+        // Written before setAgentStatus('on_call') below, not after (as it
+        // used to be) — GET /api/agents/me/active-call matches on this row
+        // the instant agents.status flips, and a SIP-only agent (no
+        // agents.phone, the modern default) has no fallback match at all if
+        // that read lands in the gap between the two writes. bridged_at is
+        // stamped here specifically (rather than derived from created_at
+        // later) so sweepStaleCalls can tell "queued a while, just
+        // answered" apart from "genuinely been ongoing too long" — see that
+        // function's own comment.
+        await upsertCallLog({
+            session_id: customerSessionId,
+            status: 'ongoing',
+            agent_id: agentId,
+            agent_number: agentPhone,
+            bridged_at: new Date(state.startedAt).toISOString()
+        });
+        await setAgentStatus(agentId, 'on_call');
 
         console.log(`🔗 Bridged ${customerSessionId} with agent ${agentId}`);
     } catch (err) {
@@ -1432,10 +1447,23 @@ async function completeOutboundBridge(sessionId) {
         const bridge = await client.bridges.create({ type: 'mixing' });
         pending.bridge = bridge;
         await bridge.addChannel({ channel: [pending.agentChannel.id, pending.destChannel.id] });
-        await upsertCallLog({ session_id: sessionId, status: 'ongoing' });
+
+        pending.answeredAt = Date.now();
+        // agent_id/agent_number/bridged_at were previously omitted here
+        // (unlike the inbound path) — an outbound call's own call_logs row
+        // had no agent attribution at all, and its "ongoing too long" sweep
+        // window was measured from row-creation instead of from when it
+        // actually bridged, same gap fixed on the inbound side.
+        const agentPhone = pending.agentId ? await getAgentPhone(pending.agentId) : null;
+        await upsertCallLog({
+            session_id: sessionId,
+            status: 'ongoing',
+            agent_id: pending.agentId ?? null,
+            agent_number: agentPhone,
+            bridged_at: new Date(pending.answeredAt).toISOString()
+        });
 
         pending.bridged = true;
-        pending.answeredAt = Date.now();
 
         // Without this, the roster and ring-all both kept seeing the agent
         // as 'available' for the entire duration of an outbound call — a

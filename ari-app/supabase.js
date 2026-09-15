@@ -374,7 +374,19 @@ async function sweepStaleCalls(preBridgeMaxAgeMs, ongoingMaxAgeMs) {
             .from('call_logs')
             .update({ status: 'failed' })
             .eq('status', 'ongoing')
-            .lt('created_at', ongoingCutoff)
+            // bridged_at (stamped by index.js the moment a call actually
+            // bridges), not created_at — a customer who waited a while in
+            // the queue before an agent answered could otherwise have a
+            // genuinely still-live, short conversation swept as stale
+            // because the clock was really measuring their queue wait, not
+            // how long they've been on the call. .lt() against a null
+            // bridged_at is never true, so a legacy row from before this
+            // column existed (there should be none, in practice, given
+            // deploys only happen during a confirmed zero-active-calls
+            // window) simply isn't matched here — that's fine, since a
+            // truly orphaned pre-bridge row is already caught by the other
+            // half of this sweep above.
+            .lt('bridged_at', ongoingCutoff)
             .select('session_id')
     ]);
 
