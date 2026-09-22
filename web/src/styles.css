@@ -1623,7 +1623,59 @@ textarea {
     flex-shrink: 0;
 }
 
+/* ── Page-width tokens ────────────────────────────────────────────── */
+/* Settings and Wallet were each hardcoding their own maxWidth inline
+   (720/900) with no shared convention — same single-column, form-heavy
+   shape, no reason for the values to keep drifting independently. The
+   values themselves are unchanged (Wallet's transaction table genuinely
+   wants the extra room); this just gives the next page like these two an
+   existing class to reach for instead of another one-off number. */
+.page-narrow {
+    max-width: 720px;
+}
+
+.page-medium {
+    max-width: 900px;
+}
+
 /* ── Settings page ────────────────────────────────────────────────── */
+
+/* Groups panels by what's actually at stake — see DECISIONS.md's UX-audit
+   entry. "Live" panels change real call routing the moment their toggle is
+   flipped; the badge is a standing signal of that, not just the confirm
+   dialog you only see after clicking. */
+.settings-group-label {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--secondary);
+    margin: var(--space-24) 0 var(--space-10);
+}
+
+.settings-group-label:first-child {
+    margin-top: 0;
+}
+
+.live-badge {
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: var(--space-2) var(--space-8);
+    border-radius: 999px;
+    background: rgba(243, 156, 18, 0.15);
+    color: var(--warning);
+    margin-right: var(--space-10);
+}
+
+.settings-audit-trail {
+    color: var(--muted);
+    font-size: 0.8rem;
+    margin: var(--space-8) 0 0;
+}
 
 /* Without an explicit rule, <label className="toggle-switch"> inherits the
    generic `label { display: block; margin-bottom: 14px; ... }` rule below —

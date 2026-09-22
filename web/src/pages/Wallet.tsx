@@ -195,7 +195,7 @@ export default function Wallet() {
     const isLow = wallet.balance_cents <= wallet.low_balance_threshold_cents;
 
     return (
-        <div style={{ maxWidth: 900 }}>
+        <div className="page-medium">
             <div className="panel panel-header">
                 <div>
                     <h3 style={{ marginBottom: 2 }}>Wallet balance</h3>

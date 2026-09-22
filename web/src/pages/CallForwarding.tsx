@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiFetch } from '../lib/api';
 import { useToast } from '../lib/toast';
 import ConfirmDialog from '../components/ConfirmDialog';
+import ConfirmToggle from '../components/ConfirmToggle';
 
 type Rule = { id: number; condition: string; destination: string };
 
@@ -12,6 +13,8 @@ type BusinessHours = {
     close_time: string;
     active_days: number[];
     after_hours_message: string;
+    updated_at?: string | null;
+    updated_by?: string | null;
 };
 
 // 'busy'/'always' can be saved here but aren't applied to live call
@@ -39,10 +42,19 @@ function errorMessage(err: unknown) {
     return err instanceof Error ? err.message : 'Something went wrong';
 }
 
+function AuditTrail({ updatedAt, updatedBy }: { updatedAt?: string | null; updatedBy?: string | null }) {
+    if (!updatedBy) return null;
+    return (
+        <p className="settings-audit-trail">
+            Last changed by {updatedBy}
+            {updatedAt && ` · ${new Date(updatedAt).toLocaleString()}`}
+        </p>
+    );
+}
+
 function BusinessHoursPanel() {
     const queryClient = useQueryClient();
     const showToast = useToast();
-    const [confirmingEnable, setConfirmingEnable] = useState(false);
 
     const { data, isLoading, isError } = useQuery({ queryKey: ['business-hours'], queryFn: () => apiFetch('/api/business-hours') });
     const hours: BusinessHours | null = data?.hours ?? null;
@@ -71,24 +83,16 @@ function BusinessHoursPanel() {
         setForm({ ...form, active_days: active });
     }
 
-    // Same reasoning as CallRatingPanel/CallForwarding's own "enable"
-    // toggles below — turning this on immediately changes what every
-    // caller hears outside business hours, so it gets the same confirm-on-enable
-    // guard they already have. Turning it back off needs no confirmation.
-    function handleToggleEnabled(checked: boolean) {
+    // ConfirmToggle already gates the ON direction behind its own confirm
+    // dialog — this only needs to apply the change, optimistically, for
+    // either direction, and roll back on a failed save. Without the
+    // rollback, a failed PATCH left the toggle showing the new (wrong)
+    // state indefinitely, since nothing else re-syncs `form` until an
+    // unrelated refetch happens to overwrite it.
+    function handleToggleEnabled(next: boolean) {
         if (!form) return;
-        if (checked) {
-            setConfirmingEnable(true);
-        } else {
-            setForm({ ...form, enabled: false });
-            // Rolls the optimistic flip back on a failed save — without
-            // this, a failed PATCH left the toggle showing the new (wrong)
-            // state indefinitely, since nothing else re-syncs `form` until
-            // an unrelated refetch happens to overwrite it. Mirrors
-            // IvrEditor's toggleMenuEnabled, adapted for `enabled` being one
-            // field of a larger form object rather than its own state.
-            save.mutate({ enabled: false }, { onError: () => setForm(current => (current ? { ...current, enabled: true } : current)) });
-        }
+        setForm({ ...form, enabled: next });
+        save.mutate({ enabled: next }, { onError: () => setForm(current => (current ? { ...current, enabled: !next } : current)) });
     }
 
     // Previously `if (!form) return null` unmounted the whole panel —
@@ -118,33 +122,22 @@ function BusinessHoursPanel() {
         <div className="panel">
             <div className="panel-header">
                 <h3>Business hours</h3>
-                <label className="toggle-switch">
-                    <input
-                        type="checkbox"
+                <div style={{ display: 'flex', alignItems: 'center' }}>
+                    <span className="live-badge">Live</span>
+                    <ConfirmToggle
                         checked={form.enabled}
-                        onChange={e => handleToggleEnabled(e.target.checked)}
-                        aria-label="Enable business hours"
+                        ariaLabel="Enable business hours"
+                        onChange={handleToggleEnabled}
+                        confirmTitle="Turn on business hours?"
+                        confirmMessage="Callers outside the configured hours will immediately hear the after-hours message below instead of the normal menu, starting with the next call."
                     />
-                    <span className="toggle-track"><span className="toggle-knob" /></span>
-                </label>
+                </div>
             </div>
             <p className="hint">
                 Outside these hours, callers hear the message below instead of the normal menu — no agent
                 needs to be online for this to work. Times are East Africa Time.
             </p>
-
-            <ConfirmDialog
-                open={confirmingEnable}
-                title="Turn on business hours?"
-                message="Callers outside the configured hours will immediately hear the after-hours message below instead of the normal menu, starting with the next call."
-                confirmLabel="Turn on"
-                onConfirm={() => {
-                    setForm({ ...form, enabled: true });
-                    save.mutate({ enabled: true }, { onError: () => setForm(current => (current ? { ...current, enabled: false } : current)) });
-                    setConfirmingEnable(false);
-                }}
-                onCancel={() => setConfirmingEnable(false)}
-            />
+            <AuditTrail updatedAt={form.updated_at} updatedBy={form.updated_by} />
 
             <div className="forwarding-add-row" style={{ gridTemplateColumns: '1fr 1fr', maxWidth: 360 }}>
                 <label>
@@ -157,7 +150,7 @@ function BusinessHoursPanel() {
                 </label>
             </div>
 
-            <label style={{ display: 'block', margin: '14px 0 6px' }}>Active days</label>
+            <label style={{ display: 'block', margin: 'var(--space-14) 0 var(--space-6)' }}>Active days</label>
             <div className="disposition-chips" style={{ marginTop: 0 }}>
                 {DAYS.map(d => (
                     <button
@@ -171,7 +164,7 @@ function BusinessHoursPanel() {
                 ))}
             </div>
 
-            <label style={{ display: 'block', marginTop: 14 }}>
+            <label style={{ display: 'block', marginTop: 'var(--space-14)' }}>
                 After-hours message
                 <textarea
                     value={form.after_hours_message}
@@ -180,7 +173,7 @@ function BusinessHoursPanel() {
                 />
             </label>
 
-            <div className="modal-actions" style={{ justifyContent: 'flex-start', marginTop: 12 }}>
+            <div className="modal-actions" style={{ justifyContent: 'flex-start', marginTop: 'var(--space-12)' }}>
                 <button
                     className="btn btn-primary"
                     disabled={!dirty || save.isPending}
@@ -203,7 +196,6 @@ function BusinessHoursPanel() {
 function CallRatingPanel() {
     const queryClient = useQueryClient();
     const showToast = useToast();
-    const [confirmingEnable, setConfirmingEnable] = useState(false);
 
     const { data, isError } = useQuery({ queryKey: ['ivr-config'], queryFn: () => apiFetch('/api/ivr-config') });
 
@@ -217,45 +209,27 @@ function CallRatingPanel() {
         onError: (err: unknown) => showToast(errorMessage(err), 'error')
     });
 
-    // Only turning it *on* needs a confirm — it's the direction that
-    // immediately changes what every caller hears at the end of a call.
-    // Turning it back off is always safe to do without one.
-    function handleChange(checked: boolean) {
-        if (checked) setConfirmingEnable(true);
-        else toggle.mutate(false);
-    }
-
     return (
         <div className="panel panel-header">
             <div>
-                <h3 style={{ marginBottom: 2 }}>Call rating</h3>
+                <h3 style={{ marginBottom: 'var(--space-2)' }}>Call rating</h3>
                 <p className="hint" style={{ marginBottom: 0 }}>
                     After the agent hangs up, the caller hears a 1-5 rating prompt before the line
                     disconnects. Off by default — changes live call flow.
                 </p>
                 {isError && <p className="error" style={{ marginBottom: 0 }}>Couldn't load the current setting.</p>}
+                <AuditTrail updatedAt={data?.rating_updated_at} updatedBy={data?.rating_updated_by} />
             </div>
-            <label className="toggle-switch">
-                <input
-                    type="checkbox"
+            <div style={{ display: 'flex', alignItems: 'center' }}>
+                <span className="live-badge">Live</span>
+                <ConfirmToggle
                     checked={!!data?.rating_enabled}
-                    onChange={e => handleChange(e.target.checked)}
-                    aria-label="Enable call rating"
+                    ariaLabel="Enable call rating"
+                    onChange={next => toggle.mutate(next)}
+                    confirmTitle="Turn on call rating?"
+                    confirmMessage="Every caller will hear a 1-5 rating prompt right before the line disconnects, starting with the next call. This takes effect immediately."
                 />
-                <span className="toggle-track"><span className="toggle-knob" /></span>
-            </label>
-
-            <ConfirmDialog
-                open={confirmingEnable}
-                title="Turn on call rating?"
-                message="Every caller will hear a 1-5 rating prompt right before the line disconnects, starting with the next call. This takes effect immediately."
-                confirmLabel="Turn on"
-                onConfirm={() => {
-                    toggle.mutate(true);
-                    setConfirmingEnable(false);
-                }}
-                onCancel={() => setConfirmingEnable(false)}
-            />
+            </div>
         </div>
     );
 }
@@ -310,7 +284,7 @@ function HoldMusicPanel() {
                 on hold.
             </p>
 
-            <p className="hint" style={{ margin: '0 0 12px' }}>
+            <p className="hint" style={{ margin: '0 0 var(--space-12)' }}>
                 Currently playing:{' '}
                 {config.active_class === 'custom' ? (
                     <>
@@ -331,7 +305,7 @@ function HoldMusicPanel() {
             </div>
 
             {config.active_class === 'custom' && (
-                <div className="modal-actions" style={{ justifyContent: 'flex-start', marginTop: 12 }}>
+                <div className="modal-actions" style={{ justifyContent: 'flex-start', marginTop: 'var(--space-12)' }}>
                     <button className="btn btn-link" disabled={reset.isPending} onClick={() => reset.mutate()}>
                         Reset to default
                     </button>
@@ -353,7 +327,6 @@ export default function CallForwarding() {
     const [newCondition, setNewCondition] = useState('no_answer');
     const [newDestination, setNewDestination] = useState('');
     const [pendingDelete, setPendingDelete] = useState<Rule | null>(null);
-    const [confirmingEnable, setConfirmingEnable] = useState(false);
 
     const toggleEnabled = useMutation({
         mutationFn: (enabled: boolean) => apiFetch('/api/forwarding-config', { method: 'PATCH', body: JSON.stringify({ enabled }) }),
@@ -363,14 +336,6 @@ export default function CallForwarding() {
         },
         onError: (err: unknown) => showToast(errorMessage(err), 'error')
     });
-
-    // Same reasoning as the call-rating toggle above — enabling forwarding
-    // immediately changes live call routing, disabling it doesn't need the
-    // same guard.
-    function handleToggleForwarding(checked: boolean) {
-        if (checked) setConfirmingEnable(true);
-        else toggleEnabled.mutate(false);
-    }
 
     const addRule = useMutation({
         mutationFn: () =>
@@ -394,37 +359,29 @@ export default function CallForwarding() {
     });
 
     return (
-        <div style={{ maxWidth: 720 }}>
+        <div className="page-narrow">
+            <div className="settings-group-label">Live call routing — changes apply to the next call</div>
+
             <BusinessHoursPanel />
 
             <div className="panel panel-header">
                 <div>
-                    <h3 style={{ marginBottom: 2 }}>Call forwarding</h3>
+                    <h3 style={{ marginBottom: 'var(--space-2)' }}>Call forwarding</h3>
                     <p className="hint" style={{ marginBottom: 0 }}>Route calls elsewhere based on the rules below.</p>
                     {configIsError && <p className="error" style={{ marginBottom: 0 }}>Couldn't load the current setting.</p>}
+                    <AuditTrail updatedAt={configData?.updated_at} updatedBy={configData?.updated_by} />
                 </div>
-                <label className="toggle-switch">
-                    <input
-                        type="checkbox"
+                <div style={{ display: 'flex', alignItems: 'center' }}>
+                    <span className="live-badge">Live</span>
+                    <ConfirmToggle
                         checked={!!configData?.enabled}
-                        onChange={e => handleToggleForwarding(e.target.checked)}
-                        aria-label="Enable call forwarding"
+                        ariaLabel="Enable call forwarding"
+                        onChange={next => toggleEnabled.mutate(next)}
+                        confirmTitle="Turn on call forwarding?"
+                        confirmMessage="Calls will start routing according to the rules below the moment this is on. This takes effect immediately."
                     />
-                    <span className="toggle-track"><span className="toggle-knob" /></span>
-                </label>
+                </div>
             </div>
-
-            <ConfirmDialog
-                open={confirmingEnable}
-                title="Turn on call forwarding?"
-                message="Calls will start routing according to the rules below the moment this is on. This takes effect immediately."
-                confirmLabel="Turn on"
-                onConfirm={() => {
-                    toggleEnabled.mutate(true);
-                    setConfirmingEnable(false);
-                }}
-                onCancel={() => setConfirmingEnable(false)}
-            />
 
             <div className="panel">
                 <div className="panel-header">
@@ -472,6 +429,9 @@ export default function CallForwarding() {
             />
 
             <CallRatingPanel />
+
+            <div className="settings-group-label">Caller experience</div>
+
             <HoldMusicPanel />
         </div>
     );

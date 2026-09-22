@@ -1500,7 +1500,7 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
     app.get('/api/ivr-config', requireSupervisor, async (req, res) => {
         const { data, error } = await supabase
             .from('ivr_config')
-            .select('greeting, tts_voice, tts_speed_scale, rating_enabled, menu_enabled')
+            .select('greeting, tts_voice, tts_speed_scale, rating_enabled, menu_enabled, rating_updated_at, rating_updated_by')
             .eq('id', 1)
             .single();
 
@@ -1514,7 +1514,9 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
             tts_voice: data.tts_voice,
             tts_speed_scale: data.tts_speed_scale,
             rating_enabled: data.rating_enabled,
-            menu_enabled: data.menu_enabled
+            menu_enabled: data.menu_enabled,
+            rating_updated_at: data.rating_updated_at,
+            rating_updated_by: data.rating_updated_by
         });
     });
 
@@ -1540,7 +1542,15 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         if (greeting !== undefined) updates.greeting = greeting.trim();
         if (tts_voice !== undefined) updates.tts_voice = tts_voice;
         if (tts_speed_scale !== undefined) updates.tts_speed_scale = tts_speed_scale;
-        if (rating_enabled !== undefined) updates.rating_enabled = !!rating_enabled;
+        if (rating_enabled !== undefined) {
+            updates.rating_enabled = !!rating_enabled;
+            // Dedicated columns, not the shared updated_at above — that one
+            // is stamped on ANY ivr_config edit (greeting, voice, ...), so
+            // it can't answer "when did call rating specifically change"
+            // without risking a misleading answer.
+            updates.rating_updated_at = new Date().toISOString();
+            updates.rating_updated_by = req.user.email;
+        }
         if (menu_enabled !== undefined) updates.menu_enabled = !!menu_enabled;
 
         const { data, error } = await supabase
@@ -1884,14 +1894,18 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
     // saved with that condition is just informational for now.
 
     app.get('/api/forwarding-config', requireSupervisor, async (req, res) => {
-        const { data, error } = await supabase.from('forwarding_config').select('enabled').eq('id', 1).single();
+        const { data, error } = await supabase
+            .from('forwarding_config')
+            .select('enabled, updated_at, updated_by')
+            .eq('id', 1)
+            .single();
 
         if (error) {
             console.error(error);
             return res.status(500).json({ error: 'Failed to load forwarding config' });
         }
 
-        res.json({ enabled: data.enabled });
+        res.json({ enabled: data.enabled, updated_at: data.updated_at, updated_by: data.updated_by });
     });
 
     app.patch('/api/forwarding-config', requireSupervisor, async (req, res) => {
@@ -1899,7 +1913,7 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
 
         const { data, error } = await supabase
             .from('forwarding_config')
-            .update({ enabled: !!enabled })
+            .update({ enabled: !!enabled, updated_at: new Date().toISOString(), updated_by: req.user.email })
             .eq('id', 1)
             .select('id');
 
@@ -2016,6 +2030,9 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
             }
             fieldUpdates.after_hours_message = after_hours_message;
         }
+
+        fieldUpdates.updated_at = new Date().toISOString();
+        fieldUpdates.updated_by = req.user.email;
 
         const { data, error } = await supabase.from('business_hours').update(fieldUpdates).eq('id', 1).select().single();
 
