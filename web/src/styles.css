@@ -1,4 +1,4 @@
-/* ── Moneto brand palette ──────────────────────────────────────────── */
+/* ── Chumz brand palette ───────────────────────────────────────────── */
 
 :root {
     --ink: #2C3E50;
@@ -322,6 +322,12 @@ h1, h2, h3, h4 {
 }
 
 .topbar-title {
+    /* A plain <div> before this — every page went straight into a .panel's
+       h3 with nothing above it, so a screen-reader user navigating by
+       heading level had no page landmark anywhere in the app. This is now
+       a real <h1>; margin: 0 keeps it from disturbing .topbar-left's flex
+       layout the way a heading's default browser margin would. */
+    margin: 0;
     font-family: 'Plus Jakarta Sans', sans-serif;
     font-weight: 700;
     font-size: 19px;
@@ -1628,10 +1634,25 @@ textarea {
     display: inline-flex;
     align-items: center;
     margin-bottom: 0;
+    position: relative;
 }
 
+/* display:none removes the checkbox from the accessibility tree in most
+   browsers/screen readers, not just visually — every toggle in the app was
+   unreachable by keyboard or screen reader as a result. Same visually-hidden
+   technique as .sr-only above (clip to nothing, don't remove from the tree)
+   keeps it focusable and announced, while the .toggle-track it's paired
+   with still renders the visible switch exactly as before. */
 .toggle-switch input {
-    display: none;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
 }
 
 .toggle-track {
@@ -1647,6 +1668,13 @@ textarea {
 
 .toggle-switch input:checked + .toggle-track {
     background: var(--brand);
+}
+
+/* Same focus treatment as every other form control (see input:focus above)
+   — the input is reachable by keyboard again now, so it needs a visible
+   focus state of its own. */
+.toggle-switch input:focus + .toggle-track {
+    box-shadow: 0 0 0 3px rgba(var(--brand-rgb), 0.15);
 }
 
 .toggle-knob {

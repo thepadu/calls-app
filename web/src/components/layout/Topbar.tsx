@@ -15,7 +15,8 @@ const TITLES: Record<string, string> = {
     '/analytics': 'Analytics',
     '/agents': 'Agents',
     '/ivr': 'IVR Builder',
-    '/settings': 'Settings'
+    '/settings': 'Settings',
+    '/wallet': 'Wallet'
 };
 
 // A dropped SIP connection previously only ever surfaced as a toast an
@@ -62,7 +63,7 @@ export default function Topbar({ onMenuClick, menuOpen }: { onMenuClick: () => v
                 >
                     <Menu size={20} />
                 </button>
-                <div className="topbar-title">{title}</div>
+                <h1 className="topbar-title">{title}</h1>
             </div>
             <div className="topbar-right">
                 <div className="topbar-badge">

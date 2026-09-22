@@ -1,4 +1,4 @@
-// Moneto brand palette: teal for "good/active" states, a lighter tealGreen
+// Chumz brand palette: teal for "good/active" states, a lighter tealGreen
 // for "in progress right now", gold-orange for "needs attention soon", and
 // coral for anything that didn't go as planned. `ringing`, `break`, and
 // `forwarded` used to all share the same gold-orange despite being three

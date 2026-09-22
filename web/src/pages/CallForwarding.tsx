@@ -14,10 +14,14 @@ type BusinessHours = {
     after_hours_message: string;
 };
 
+// 'busy'/'always' can be saved here but aren't applied to live call
+// routing yet (see the Rules panel's own hint text below) — labeled
+// in-place rather than hidden, since existing saved rules of these types
+// still need to show up correctly in the dropdown when edited.
 const CONDITIONS: { value: string; label: string }[] = [
     { value: 'no_answer', label: 'No answer' },
-    { value: 'busy', label: 'Line busy' },
-    { value: 'always', label: 'Always' },
+    { value: 'busy', label: 'Line busy — not yet active' },
+    { value: 'always', label: 'Always — not yet active' },
     { value: 'after_hours', label: 'After hours' }
 ];
 
@@ -115,7 +119,12 @@ function BusinessHoursPanel() {
             <div className="panel-header">
                 <h3>Business hours</h3>
                 <label className="toggle-switch">
-                    <input type="checkbox" checked={form.enabled} onChange={e => handleToggleEnabled(e.target.checked)} />
+                    <input
+                        type="checkbox"
+                        checked={form.enabled}
+                        onChange={e => handleToggleEnabled(e.target.checked)}
+                        aria-label="Enable business hours"
+                    />
                     <span className="toggle-track"><span className="toggle-knob" /></span>
                 </label>
             </div>
@@ -231,6 +240,7 @@ function CallRatingPanel() {
                     type="checkbox"
                     checked={!!data?.rating_enabled}
                     onChange={e => handleChange(e.target.checked)}
+                    aria-label="Enable call rating"
                 />
                 <span className="toggle-track"><span className="toggle-knob" /></span>
             </label>
@@ -398,6 +408,7 @@ export default function CallForwarding() {
                         type="checkbox"
                         checked={!!configData?.enabled}
                         onChange={e => handleToggleForwarding(e.target.checked)}
+                        aria-label="Enable call forwarding"
                     />
                     <span className="toggle-track"><span className="toggle-knob" /></span>
                 </label>

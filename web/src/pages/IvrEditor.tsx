@@ -235,6 +235,7 @@ export default function IvrEditor() {
                                     type="checkbox"
                                     checked={menuEnabled}
                                     onChange={e => handleMenuEnabledChange(e.target.checked)}
+                                    aria-label="Enable interactive menu"
                                 />
                                 <span className="toggle-track"><span className="toggle-knob" /></span>
                             </label>
