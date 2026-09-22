@@ -2080,12 +2080,20 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         // a new one on every retry).
         const reference = `topup:${crypto.randomUUID()}`;
 
+        // Every named parameter wallet_apply_transaction currently defines,
+        // even p_direction (always null for a top-up) — a call with a
+        // partial parameter set matches any future overload with the same
+        // prefix just as ambiguously as it matched the old 5-parameter
+        // version here (see DECISIONS.md's PGRST203 incident). Passing the
+        // full set explicitly is what makes this call unambiguous
+        // regardless of what a later migration adds.
         const { data, error } = await supabase.rpc('wallet_apply_transaction', {
             p_type: 'topup',
             p_amount_cents: amount_cents,
             p_reference: reference,
             p_description: description || null,
-            p_created_by: req.user.email
+            p_created_by: req.user.email,
+            p_direction: null
         });
 
         if (error) {

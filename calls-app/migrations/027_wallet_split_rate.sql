@@ -25,6 +25,16 @@ alter table wallet drop column if exists rate_micros_per_second;
 alter table wallet_transactions
     add column if not exists direction text check (direction in ('inbound', 'outbound'));
 
+-- `create or replace function` only replaces a function with the exact same
+-- parameter list — adding p_direction here changed the signature, so
+-- Postgres created a SECOND overload instead of replacing the original
+-- 5-parameter one. Any caller that didn't pass all 6 named parameters
+-- (calls-app's top-up route, which has no direction to pass) then matched
+-- both overloads and PostgREST refused to guess which one to run
+-- (PGRST203 "Could not choose the best candidate function") — hit this live
+-- in production. Must drop the old signature explicitly first.
+drop function if exists wallet_apply_transaction(text, bigint, text, text, text);
+
 create or replace function wallet_apply_transaction(
     p_type text,
     p_amount_cents bigint,
