@@ -6,7 +6,8 @@ import Pagination from '../components/Pagination';
 
 type WalletRow = {
     balance_cents: number;
-    rate_micros_per_second: number;
+    inbound_rate_micros_per_second: number;
+    outbound_rate_micros_per_second: number;
     low_balance_threshold_cents: number;
 };
 
@@ -19,6 +20,7 @@ type Transaction = {
     description: string | null;
     created_by: string | null;
     created_at: string;
+    direction: 'inbound' | 'outbound' | null;
 };
 
 const PAGE_SIZE = 25;
@@ -39,20 +41,23 @@ function ConfigPanel({ wallet }: { wallet: WalletRow }) {
 
     // Edited as whole KES/cents in the UI, converted to the stored units
     // only on save — nobody wants to type "50000" to mean KES 0.50/sec.
-    const [rateKesPerSecond, setRateKesPerSecond] = useState(String(wallet.rate_micros_per_second / 1_000_000));
+    const [inboundKes, setInboundKes] = useState(String(wallet.inbound_rate_micros_per_second / 1_000_000));
+    const [outboundKes, setOutboundKes] = useState(String(wallet.outbound_rate_micros_per_second / 1_000_000));
     const [thresholdKes, setThresholdKes] = useState(String(wallet.low_balance_threshold_cents / 100));
 
     useEffect(() => {
-        setRateKesPerSecond(String(wallet.rate_micros_per_second / 1_000_000));
+        setInboundKes(String(wallet.inbound_rate_micros_per_second / 1_000_000));
+        setOutboundKes(String(wallet.outbound_rate_micros_per_second / 1_000_000));
         setThresholdKes(String(wallet.low_balance_threshold_cents / 100));
-    }, [wallet.rate_micros_per_second, wallet.low_balance_threshold_cents]);
+    }, [wallet.inbound_rate_micros_per_second, wallet.outbound_rate_micros_per_second, wallet.low_balance_threshold_cents]);
 
     const save = useMutation({
         mutationFn: () =>
             apiFetch('/api/wallet/config', {
                 method: 'PATCH',
                 body: JSON.stringify({
-                    rate_micros_per_second: Math.round(Number(rateKesPerSecond) * 1_000_000),
+                    inbound_rate_micros_per_second: Math.round(Number(inboundKes) * 1_000_000),
+                    outbound_rate_micros_per_second: Math.round(Number(outboundKes) * 1_000_000),
                     low_balance_threshold_cents: Math.round(Number(thresholdKes) * 100)
                 })
             }),
@@ -63,25 +68,27 @@ function ConfigPanel({ wallet }: { wallet: WalletRow }) {
         onError: (err: unknown) => showToast(errorMessage(err), 'error')
     });
 
-    const rateValid = rateKesPerSecond !== '' && Number.isFinite(Number(rateKesPerSecond)) && Number(rateKesPerSecond) >= 0;
+    const inboundValid = inboundKes !== '' && Number.isFinite(Number(inboundKes)) && Number(inboundKes) >= 0;
+    const outboundValid = outboundKes !== '' && Number.isFinite(Number(outboundKes)) && Number(outboundKes) >= 0;
     const thresholdValid = thresholdKes !== '' && Number.isFinite(Number(thresholdKes)) && Number(thresholdKes) >= 0;
 
     return (
         <div className="panel">
             <div className="panel-header">
                 <h3>Billing settings</h3>
-                <p className="hint">Charged per second of connected call time, settled when each call ends.</p>
+                <p className="hint">
+                    Charged per second of connected call time, settled when each call ends. Inbound and outbound are
+                    billed separately — Africa's Talking charges very differently by direction.
+                </p>
             </div>
-            <div className="forwarding-add-row" style={{ gridTemplateColumns: '1fr 1fr auto' }}>
+            <div className="forwarding-add-row" style={{ gridTemplateColumns: '1fr 1fr 1fr auto' }}>
                 <label>
-                    Rate (KES per second)
-                    <input
-                        type="number"
-                        min="0"
-                        step="0.0001"
-                        value={rateKesPerSecond}
-                        onChange={e => setRateKesPerSecond(e.target.value)}
-                    />
+                    Inbound rate (KES/sec)
+                    <input type="number" min="0" step="0.0001" value={inboundKes} onChange={e => setInboundKes(e.target.value)} />
+                </label>
+                <label>
+                    Outbound rate (KES/sec)
+                    <input type="number" min="0" step="0.0001" value={outboundKes} onChange={e => setOutboundKes(e.target.value)} />
                 </label>
                 <label>
                     Low-balance alert threshold (KES)
@@ -95,7 +102,7 @@ function ConfigPanel({ wallet }: { wallet: WalletRow }) {
                 </label>
                 <button
                     className="btn btn-primary"
-                    disabled={!rateValid || !thresholdValid || save.isPending}
+                    disabled={!inboundValid || !outboundValid || !thresholdValid || save.isPending}
                     onClick={() => save.mutate()}
                 >
                     Save
@@ -157,6 +164,7 @@ function TransactionRow({ tx }: { tx: Transaction }) {
         <tr>
             <td>{new Date(tx.created_at).toLocaleString()}</td>
             <td>{tx.type}</td>
+            <td>{tx.direction ?? '—'}</td>
             <td style={tx.amount_cents < 0 ? { color: 'var(--danger)' } : undefined}>
                 {sign}
                 {formatKes(tx.amount_cents)}
@@ -211,6 +219,7 @@ export default function Wallet() {
                         <tr>
                             <th>When</th>
                             <th>Type</th>
+                            <th>Direction</th>
                             <th>Amount</th>
                             <th>Balance after</th>
                             <th>Description</th>
@@ -219,7 +228,7 @@ export default function Wallet() {
                     </thead>
                     <tbody>
                         {transactions.length === 0 && (
-                            <tr><td colSpan={6} className="empty">No transactions yet</td></tr>
+                            <tr><td colSpan={7} className="empty">No transactions yet</td></tr>
                         )}
                         {transactions.map(tx => (
                             <TransactionRow key={tx.id} tx={tx} />

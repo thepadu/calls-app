@@ -2097,14 +2097,20 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
     });
 
     app.patch('/api/wallet/config', requireSupervisor, async (req, res) => {
-        const { rate_micros_per_second, low_balance_threshold_cents } = req.body;
+        const { inbound_rate_micros_per_second, outbound_rate_micros_per_second, low_balance_threshold_cents } = req.body;
 
         const updates = { updated_at: new Date().toISOString() };
-        if (rate_micros_per_second !== undefined) {
-            if (!Number.isInteger(rate_micros_per_second) || rate_micros_per_second < 0) {
-                return res.status(400).json({ error: 'rate_micros_per_second must be a non-negative integer' });
+        if (inbound_rate_micros_per_second !== undefined) {
+            if (!Number.isInteger(inbound_rate_micros_per_second) || inbound_rate_micros_per_second < 0) {
+                return res.status(400).json({ error: 'inbound_rate_micros_per_second must be a non-negative integer' });
             }
-            updates.rate_micros_per_second = rate_micros_per_second;
+            updates.inbound_rate_micros_per_second = inbound_rate_micros_per_second;
+        }
+        if (outbound_rate_micros_per_second !== undefined) {
+            if (!Number.isInteger(outbound_rate_micros_per_second) || outbound_rate_micros_per_second < 0) {
+                return res.status(400).json({ error: 'outbound_rate_micros_per_second must be a non-negative integer' });
+            }
+            updates.outbound_rate_micros_per_second = outbound_rate_micros_per_second;
         }
         if (low_balance_threshold_cents !== undefined) {
             if (!Number.isInteger(low_balance_threshold_cents) || low_balance_threshold_cents < 0) {

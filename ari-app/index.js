@@ -1260,7 +1260,7 @@ async function bridgeAgentLeg(agentChannel, agentId, customerSessionId) {
         await setAgentStatus(agentId, 'available');
         const duration = state.startedAt ? Math.round((Date.now() - state.startedAt) / 1000) : 0;
         await upsertCallLog({ session_id: customerSessionId, status: finalStatus, duration });
-        await applyCallUsageCharge(customerSessionId, duration, alertGChat);
+        await applyCallUsageCharge(customerSessionId, duration, 'inbound', alertGChat);
         console.log(`📴 Call ended: ${customerSessionId} <-> ${agentLabel} (${finalStatus})`);
     };
 
@@ -1672,7 +1672,7 @@ async function finishOutboundCall(sessionId, status) {
 
     const duration = pending.answeredAt ? Math.round((Date.now() - pending.answeredAt) / 1000) : 0;
     await upsertCallLog({ session_id: sessionId, status, duration });
-    await applyCallUsageCharge(sessionId, duration, alertGChat);
+    await applyCallUsageCharge(sessionId, duration, 'outbound', alertGChat);
 
     console.log(`📴 Outbound call ended: ${sessionId} (${status})`);
 }

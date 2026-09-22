@@ -4,15 +4,23 @@
 // DECISIONS.md's finance-wallet entry for why (Twilio/Africa's Talking both
 // bill this way too: simpler, immune to a poller crashing mid-call, and
 // there's no new call-lifecycle tracking to get wrong).
-const { getWalletRate, applyWalletTransaction } = require('./supabase');
+//
+// Inbound/outbound are billed at different rates (Africa's Talking's own
+// Kenya voice rates differ by roughly 4.5x between the two) — see
+// DECISIONS.md's rate-split entry.
+const { getWalletRates, applyWalletTransaction } = require('./supabase');
 
 // Unanswered/abandoned calls never bridged, so they have no billable
 // talk-time — duration is 0/undefined for those, and this is a deliberate
-// no-op rather than a 0-cents transaction cluttering the ledger.
-async function applyCallUsageCharge(sessionId, durationSeconds, alertGChat) {
+// no-op rather than a 0-cents transaction cluttering the ledger. `direction`
+// is always one of 'inbound'/'outbound' — each of index.js's two call-end
+// sites already knows its own direction structurally, so this never has to
+// infer it.
+async function applyCallUsageCharge(sessionId, durationSeconds, direction, alertGChat) {
     if (!durationSeconds) return;
 
-    const rateMicrosPerSecond = await getWalletRate();
+    const rates = await getWalletRates();
+    const rateMicrosPerSecond = direction === 'outbound' ? rates.outbound : rates.inbound;
     if (!rateMicrosPerSecond) return;
 
     const amountCents = -Math.round((durationSeconds * rateMicrosPerSecond) / 1_000_000);
@@ -26,7 +34,8 @@ async function applyCallUsageCharge(sessionId, durationSeconds, alertGChat) {
     const result = await applyWalletTransaction({
         type: 'usage',
         amountCents,
-        reference: `call:${sessionId}`
+        reference: `call:${sessionId}`,
+        direction
     });
 
     if (result?.low_balance_crossed) {

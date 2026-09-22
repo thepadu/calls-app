@@ -55,31 +55,44 @@ async function getIvrConfig() {
     };
 }
 
-// Only the rate is needed before a usage charge can even be computed — the
-// balance/threshold live in the same row but are only ever read by the
-// wallet_apply_transaction RPC itself (see migration 026), never here.
-async function getWalletRate() {
-    const { data, error } = await supabase.from('wallet').select('rate_micros_per_second').eq('id', 1).single();
+// Only the rates are needed before a usage charge can even be computed —
+// the balance/threshold live in the same row but are only ever read by the
+// wallet_apply_transaction RPC itself (see migrations 026/027), never here.
+// Inbound and outbound are billed at different rates (Africa's Talking's
+// own rates differ by roughly 4.5x between the two) — one query, both
+// rates, since the row is a singleton either way.
+async function getWalletRates() {
+    const { data, error } = await supabase
+        .from('wallet')
+        .select('inbound_rate_micros_per_second, outbound_rate_micros_per_second')
+        .eq('id', 1)
+        .single();
     if (error) {
-        console.error('❌ Failed to load wallet rate:', error.message);
+        console.error('❌ Failed to load wallet rates:', error.message);
         // 0 means "don't charge" rather than guessing a rate — a missing/
         // errored row should never silently bill at some made-up amount.
-        return 0;
+        return { inbound: 0, outbound: 0 };
     }
-    return data.rate_micros_per_second ?? 0;
+    return {
+        inbound: data.inbound_rate_micros_per_second ?? 0,
+        outbound: data.outbound_rate_micros_per_second ?? 0
+    };
 }
 
 // The only place a wallet balance is ever mutated from — see migration
 // 026's wallet_apply_transaction for the atomicity/idempotency logic this
 // wraps. Returns null on error so callers can skip the low-balance check
-// rather than crash a call teardown over a wallet-write failure.
-async function applyWalletTransaction({ type, amountCents, reference, description, createdBy }) {
+// rather than crash a call teardown over a wallet-write failure. `direction`
+// only applies to usage debits ('inbound'/'outbound') — omitted for
+// top-ups/reversals, same as today.
+async function applyWalletTransaction({ type, amountCents, reference, description, createdBy, direction }) {
     const { data, error } = await supabase.rpc('wallet_apply_transaction', {
         p_type: type,
         p_amount_cents: amountCents,
         p_reference: reference,
         p_description: description ?? null,
-        p_created_by: createdBy ?? null
+        p_created_by: createdBy ?? null,
+        p_direction: direction ?? null
     });
     if (error) {
         console.error('❌ Failed to apply wallet transaction:', error.message);
@@ -583,6 +596,6 @@ module.exports = {
     reconcileGhostAgents,
     getOnCallAgentsWithSip,
     sweepStaleCalls,
-    getWalletRate,
+    getWalletRates,
     applyWalletTransaction
 };
