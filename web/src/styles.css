@@ -484,6 +484,15 @@ h1, h2, h3, h4 {
     margin: 0;
 }
 
+/* Scopes horizontal scrolling to one wide table instead of the whole page
+   — Calls' own table happens to fit its container at desktop width (only
+   needs .panel's mobile-breakpoint overflow-x fallback below), but Wallet's
+   9-column history table doesn't, and was silently clipping at the right
+   edge until this existed. */
+.table-scroll {
+    overflow-x: auto;
+}
+
 table {
     width: 100%;
     border-collapse: collapse;

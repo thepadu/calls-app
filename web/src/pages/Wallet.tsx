@@ -213,22 +213,24 @@ function DayTransactions({ day }: { day: string }) {
             {isError && <p className="error">Couldn't load transactions for this day.</p>}
             {!isLoading && !isError && (
                 <>
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>When</th>
-                                <th>Type</th>
-                                <th>Direction</th>
-                                <th>Amount</th>
-                                <th>Balance after</th>
-                                <th>Description</th>
-                                <th>By</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {transactions.map(tx => <TransactionRow key={tx.id} tx={tx} />)}
-                        </tbody>
-                    </table>
+                    <div className="table-scroll">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>When</th>
+                                    <th>Type</th>
+                                    <th>Direction</th>
+                                    <th>Amount</th>
+                                    <th>Balance after</th>
+                                    <th>Description</th>
+                                    <th>By</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {transactions.map(tx => <TransactionRow key={tx.id} tx={tx} />)}
+                            </tbody>
+                        </table>
+                    </div>
                     <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
                 </>
             )}
@@ -311,34 +313,36 @@ export default function Wallet() {
                     <h3>Transaction history</h3>
                     <p className="hint">One row per day — open a day to see its individual transactions.</p>
                 </div>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Day</th>
-                            <th>Transactions</th>
-                            <th>Topped up</th>
-                            <th>Inbound cost</th>
-                            <th>Outbound cost</th>
-                            <th>Reversals</th>
-                            <th>Net change</th>
-                            <th>Balance (end of day)</th>
-                            <th></th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {days.length === 0 && (
-                            <tr><td colSpan={9} className="empty">No transactions yet</td></tr>
-                        )}
-                        {days.map(d => (
-                            <DayRow
-                                key={d.day}
-                                day={d}
-                                expanded={expandedDay === d.day}
-                                onToggle={() => setExpandedDay(current => (current === d.day ? null : d.day))}
-                            />
-                        ))}
-                    </tbody>
-                </table>
+                <div className="table-scroll">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Day</th>
+                                <th>Transactions</th>
+                                <th>Topped up</th>
+                                <th>Inbound cost</th>
+                                <th>Outbound cost</th>
+                                <th>Reversals</th>
+                                <th>Net change</th>
+                                <th>Balance (end of day)</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {days.length === 0 && (
+                                <tr><td colSpan={9} className="empty">No transactions yet</td></tr>
+                            )}
+                            {days.map(d => (
+                                <DayRow
+                                    key={d.day}
+                                    day={d}
+                                    expanded={expandedDay === d.day}
+                                    onToggle={() => setExpandedDay(current => (current === d.day ? null : d.day))}
+                                />
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
                 <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
             </div>
         </div>
