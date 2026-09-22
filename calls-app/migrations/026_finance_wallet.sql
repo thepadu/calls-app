@@ -62,6 +62,16 @@ create or replace function wallet_apply_transaction(
     p_description text default null,
     p_created_by text default null
 ) returns table (applied boolean, balance_cents bigint, low_balance_crossed boolean) as $$
+#variable_conflict use_column
+-- This function's OUT parameter `balance_cents` deliberately has the same
+-- name as the real column on both `wallet` and `wallet_transactions` (it's
+-- clearer for API callers than an artificially different name). Without
+-- this pragma, Postgres's default (`plpgsql.variable_conflict = error`)
+-- throws "column reference is ambiguous" the moment a query below reads or
+-- writes a column named `balance_cents` — hit this live during deploy
+-- verification. This tells it to always prefer the real table column over
+-- the OUT parameter, which is what every reference to `balance_cents` in
+-- the query bodies below actually means.
 declare
     v_old_balance bigint;
     v_new_balance bigint;
