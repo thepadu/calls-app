@@ -2056,31 +2056,52 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         const from = (page - 1) * pageSize;
         const to = from + pageSize - 1;
 
-        const [walletResult, txResult] = await Promise.all([
-            supabase.from('wallet').select('*').eq('id', 1).single(),
-            supabase
-                .from('wallet_transactions')
-                .select('*', { count: 'exact' })
-                .order('created_at', { ascending: false })
-                .range(from, to)
-        ]);
-
-        if (walletResult.error) {
-            console.error(walletResult.error);
+        const { data: wallet, error: walletError } = await supabase.from('wallet').select('*').eq('id', 1).single();
+        if (walletError) {
+            console.error(walletError);
             return res.status(500).json({ error: 'Failed to load wallet' });
         }
-        if (txResult.error) {
-            console.error(txResult.error);
-            return res.status(500).json({ error: 'Failed to load wallet transactions' });
+
+        // ?day=YYYY-MM-DD drills into one day's individual transactions —
+        // the default view below is a daily summary instead, since a flat
+        // list of every usage debit stops being readable the moment real
+        // call volume starts producing one row per call.
+        if (req.query.day) {
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(req.query.day)) {
+                return res.status(400).json({ error: 'Invalid day, expected YYYY-MM-DD' });
+            }
+            // +03:00, not a bare timestamp — Postgres would otherwise
+            // interpret an unqualified string in the session's own
+            // timezone (typically UTC), which wouldn't match
+            // wallet_daily_summary's Nairobi-day grouping (migration 029).
+            const { data, error, count } = await supabase
+                .from('wallet_transactions')
+                .select('*', { count: 'exact' })
+                .gte('created_at', `${req.query.day}T00:00:00+03:00`)
+                .lte('created_at', `${req.query.day}T23:59:59.999999+03:00`)
+                .order('created_at', { ascending: false })
+                .range(from, to);
+
+            if (error) {
+                console.error(error);
+                return res.status(500).json({ error: 'Failed to load transactions for that day' });
+            }
+
+            return res.json({ wallet, transactions: data, day: req.query.day, page, pageSize, total: count });
         }
 
-        res.json({
-            wallet: walletResult.data,
-            transactions: txResult.data,
-            page,
-            pageSize,
-            total: txResult.count
-        });
+        const { data: days, error: daysError, count: totalDays } = await supabase
+            .from('wallet_daily_summary')
+            .select('*', { count: 'exact' })
+            .order('day', { ascending: false })
+            .range(from, to);
+
+        if (daysError) {
+            console.error(daysError);
+            return res.status(500).json({ error: 'Failed to load wallet history' });
+        }
+
+        res.json({ wallet, days, page, pageSize, totalDays });
     });
 
     app.post('/api/wallet/topup', requireSupervisor, async (req, res) => {
