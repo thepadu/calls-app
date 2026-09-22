@@ -37,6 +37,7 @@ const ari = require('ari-client');
 const { normalizePhone } = require('./lib/phone');
 const { errText, safeEqual, isWithinBusinessHours, parseSipUsername } = require('./lib/helpers');
 const { synthesize, invalidate } = require('./tts');
+const { applyCallUsageCharge } = require('./wallet');
 const {
     getIvrConfig,
     getIvrOptions,
@@ -1257,11 +1258,9 @@ async function bridgeAgentLeg(agentChannel, agentId, customerSessionId) {
         // unconditionally is the correct terminal state regardless of what
         // the row said a moment before.
         await setAgentStatus(agentId, 'available');
-        await upsertCallLog({
-            session_id: customerSessionId,
-            status: finalStatus,
-            duration: state.startedAt ? Math.round((Date.now() - state.startedAt) / 1000) : 0
-        });
+        const duration = state.startedAt ? Math.round((Date.now() - state.startedAt) / 1000) : 0;
+        await upsertCallLog({ session_id: customerSessionId, status: finalStatus, duration });
+        await applyCallUsageCharge(customerSessionId, duration, alertGChat);
         console.log(`📴 Call ended: ${customerSessionId} <-> ${agentLabel} (${finalStatus})`);
     };
 
@@ -1673,6 +1672,7 @@ async function finishOutboundCall(sessionId, status) {
 
     const duration = pending.answeredAt ? Math.round((Date.now() - pending.answeredAt) / 1000) : 0;
     await upsertCallLog({ session_id: sessionId, status, duration });
+    await applyCallUsageCharge(sessionId, duration, alertGChat);
 
     console.log(`📴 Outbound call ended: ${sessionId} (${status})`);
 }

@@ -19,6 +19,7 @@ const Analytics = lazy(() => import('./pages/Analytics'));
 const Agents = lazy(() => import('./pages/Agents'));
 const IvrEditor = lazy(() => import('./pages/IvrEditor'));
 const CallForwarding = lazy(() => import('./pages/CallForwarding'));
+const Wallet = lazy(() => import('./pages/Wallet'));
 
 function RequireSupervisor({ children }: { children: ReactNode }) {
     const { user, loading, isSupervisor, checkFailed } = useAuth();
@@ -83,6 +84,14 @@ function AppRoutes() {
                     element={
                         <RequireSupervisor>
                             <CallForwarding />
+                        </RequireSupervisor>
+                    }
+                />
+                <Route
+                    path="/wallet"
+                    element={
+                        <RequireSupervisor>
+                            <Wallet />
                         </RequireSupervisor>
                     }
                 />

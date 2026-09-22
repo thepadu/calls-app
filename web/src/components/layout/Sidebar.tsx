@@ -69,6 +69,9 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
                         <NavLink to="/settings" className="sidebar-link">
                             Settings
                         </NavLink>
+                        <NavLink to="/wallet" className="sidebar-link">
+                            Wallet
+                        </NavLink>
                     </>
                 )}
             </nav>

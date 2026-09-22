@@ -2027,6 +2027,105 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         res.json({ hours: data });
     });
 
+    // ── Finance wallet ───────────────────────────────────────────────────
+    // Chumz's own prepaid call-cost balance, billed per second at call-end
+    // by ari-app (see ari-app/wallet.js and migration 026). Everything here
+    // is supervisor-only — this is financial data, same gating as the
+    // agent roster.
+
+    app.get('/api/wallet', requireSupervisor, async (req, res) => {
+        const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+        const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize, 10) || 25));
+        const from = (page - 1) * pageSize;
+        const to = from + pageSize - 1;
+
+        const [walletResult, txResult] = await Promise.all([
+            supabase.from('wallet').select('*').eq('id', 1).single(),
+            supabase
+                .from('wallet_transactions')
+                .select('*', { count: 'exact' })
+                .order('created_at', { ascending: false })
+                .range(from, to)
+        ]);
+
+        if (walletResult.error) {
+            console.error(walletResult.error);
+            return res.status(500).json({ error: 'Failed to load wallet' });
+        }
+        if (txResult.error) {
+            console.error(txResult.error);
+            return res.status(500).json({ error: 'Failed to load wallet transactions' });
+        }
+
+        res.json({
+            wallet: walletResult.data,
+            transactions: txResult.data,
+            page,
+            pageSize,
+            total: txResult.count
+        });
+    });
+
+    app.post('/api/wallet/topup', requireSupervisor, async (req, res) => {
+        const { amount_cents, description } = req.body;
+
+        if (!Number.isInteger(amount_cents) || amount_cents <= 0) {
+            return res.status(400).json({ error: 'amount_cents must be a positive integer' });
+        }
+
+        // Server-generated, not client-supplied — a real payment webhook's
+        // own delivery id would take this slot later, but a manually-entered
+        // top-up has no such id to reuse, and a client-chosen reference
+        // would defeat the point of idempotency (the client could just send
+        // a new one on every retry).
+        const reference = `topup:${crypto.randomUUID()}`;
+
+        const { data, error } = await supabase.rpc('wallet_apply_transaction', {
+            p_type: 'topup',
+            p_amount_cents: amount_cents,
+            p_reference: reference,
+            p_description: description || null,
+            p_created_by: req.user.email
+        });
+
+        if (error) {
+            console.error(error);
+            return res.status(500).json({ error: 'Failed to record top-up' });
+        }
+
+        res.json({ ok: true, balance_cents: data[0].balance_cents });
+    });
+
+    app.patch('/api/wallet/config', requireSupervisor, async (req, res) => {
+        const { rate_micros_per_second, low_balance_threshold_cents } = req.body;
+
+        const updates = { updated_at: new Date().toISOString() };
+        if (rate_micros_per_second !== undefined) {
+            if (!Number.isInteger(rate_micros_per_second) || rate_micros_per_second < 0) {
+                return res.status(400).json({ error: 'rate_micros_per_second must be a non-negative integer' });
+            }
+            updates.rate_micros_per_second = rate_micros_per_second;
+        }
+        if (low_balance_threshold_cents !== undefined) {
+            if (!Number.isInteger(low_balance_threshold_cents) || low_balance_threshold_cents < 0) {
+                return res.status(400).json({ error: 'low_balance_threshold_cents must be a non-negative integer' });
+            }
+            updates.low_balance_threshold_cents = low_balance_threshold_cents;
+        }
+
+        const { data, error } = await supabase.from('wallet').update(updates).eq('id', 1).select();
+
+        if (error) {
+            console.error(error);
+            return res.status(500).json({ error: 'Failed to update wallet config' });
+        }
+        if (!data.length) {
+            return res.status(500).json({ error: 'Wallet row is missing — contact an engineer' });
+        }
+
+        res.json({ ok: true });
+    });
+
     // ── Hold music ────────────────────────────────────────────────────────
 
     app.get('/api/hold-music', requireSupervisor, async (req, res) => {

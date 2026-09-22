@@ -55,6 +55,41 @@ async function getIvrConfig() {
     };
 }
 
+// Only the rate is needed before a usage charge can even be computed — the
+// balance/threshold live in the same row but are only ever read by the
+// wallet_apply_transaction RPC itself (see migration 026), never here.
+async function getWalletRate() {
+    const { data, error } = await supabase.from('wallet').select('rate_micros_per_second').eq('id', 1).single();
+    if (error) {
+        console.error('❌ Failed to load wallet rate:', error.message);
+        // 0 means "don't charge" rather than guessing a rate — a missing/
+        // errored row should never silently bill at some made-up amount.
+        return 0;
+    }
+    return data.rate_micros_per_second ?? 0;
+}
+
+// The only place a wallet balance is ever mutated from — see migration
+// 026's wallet_apply_transaction for the atomicity/idempotency logic this
+// wraps. Returns null on error so callers can skip the low-balance check
+// rather than crash a call teardown over a wallet-write failure.
+async function applyWalletTransaction({ type, amountCents, reference, description, createdBy }) {
+    const { data, error } = await supabase.rpc('wallet_apply_transaction', {
+        p_type: type,
+        p_amount_cents: amountCents,
+        p_reference: reference,
+        p_description: description ?? null,
+        p_created_by: createdBy ?? null
+    });
+    if (error) {
+        console.error('❌ Failed to apply wallet transaction:', error.message);
+        return null;
+    }
+    // supabase-js returns a `returns table (...)` RPC result as an array of
+    // rows — this function always returns exactly one.
+    return data[0];
+}
+
 async function getIvrOptions() {
     const { data, error } = await supabase.from('ivr_options').select('*').order('digit', { ascending: true });
     if (error) {
@@ -547,5 +582,7 @@ module.exports = {
     reconcileStaleAgentsOnStartup,
     reconcileGhostAgents,
     getOnCallAgentsWithSip,
-    sweepStaleCalls
+    sweepStaleCalls,
+    getWalletRate,
+    applyWalletTransaction
 };
