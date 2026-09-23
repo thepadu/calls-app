@@ -139,7 +139,7 @@ function BusinessHoursPanel() {
             </p>
             <AuditTrail updatedAt={form.updated_at} updatedBy={form.updated_by} />
 
-            <div className="forwarding-add-row" style={{ gridTemplateColumns: '1fr 1fr', maxWidth: 360 }}>
+            <div className="forwarding-add-row hours-row">
                 <label>
                     Opens
                     <input type="time" value={form.open_time} onChange={e => setForm({ ...form, open_time: e.target.value })} />
@@ -297,7 +297,7 @@ function HoldMusicPanel() {
                 )}
             </p>
 
-            <div className="forwarding-add-row" style={{ gridTemplateColumns: 'auto 1fr' }}>
+            <div className="forwarding-add-row hold-music-row">
                 <input type="file" accept="audio/mpeg,audio/mp3,.mp3" onChange={e => setFile(e.target.files?.[0] ?? null)} />
                 <button className="btn btn-primary" disabled={!file || upload.isPending} onClick={() => upload.mutate()}>
                     Upload

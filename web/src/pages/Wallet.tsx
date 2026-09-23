@@ -97,7 +97,7 @@ function ConfigPanel({ wallet }: { wallet: WalletRow }) {
                     billed separately — Africa's Talking charges very differently by direction.
                 </p>
             </div>
-            <div className="forwarding-add-row" style={{ gridTemplateColumns: '1fr 1fr 1fr auto' }}>
+            <div className="forwarding-add-row wallet-config-row">
                 <label>
                     Inbound rate (KES/sec)
                     <input type="number" min="0" step="0.0001" value={inboundKes} onChange={e => setInboundKes(e.target.value)} />
@@ -157,7 +157,7 @@ function TopUpPanel() {
                 <h3>Record a top-up</h3>
                 <p className="hint">For recording money already paid to Africa's Talking — this doesn't move real money itself.</p>
             </div>
-            <div className="forwarding-add-row" style={{ gridTemplateColumns: '1fr 1fr auto' }}>
+            <div className="forwarding-add-row wallet-topup-row">
                 <label>
                     Amount (KES)
                     <input type="number" min="0" step="0.01" value={amountKes} onChange={e => setAmountKes(e.target.value)} />

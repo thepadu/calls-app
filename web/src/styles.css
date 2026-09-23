@@ -1815,6 +1815,29 @@ textarea {
     margin-top: var(--space-14);
 }
 
+/* Wallet's own column counts, as real classes rather than an inline
+   grid-template-columns override — an inline style has higher specificity
+   than any stylesheet rule, so it silently defeated .forwarding-add-row's
+   own mobile collapse-to-one-column rule below at every width, not just
+   desktop. Found live: both forms were still 3-4 columns wide, unreadably
+   cramped, on a phone. */
+.wallet-topup-row {
+    grid-template-columns: 1fr 1fr auto;
+}
+
+.wallet-config-row {
+    grid-template-columns: 1fr 1fr 1fr auto;
+}
+
+.hours-row {
+    grid-template-columns: 1fr 1fr;
+    max-width: 360px;
+}
+
+.hold-music-row {
+    grid-template-columns: auto 1fr;
+}
+
 /* ── Call screen ──────────────────────────────────────────────────── */
 /* One unified card for all three call phases (incoming/outgoing/active),
    Android-style — fixed near the top center of the viewport, sized to feel
@@ -2204,7 +2227,11 @@ textarea {
     }
 
     .forwarding-add-row,
-    .forwarding-rule-row {
+    .forwarding-rule-row,
+    .wallet-topup-row,
+    .wallet-config-row,
+    .hours-row,
+    .hold-music-row {
         grid-template-columns: 1fr;
     }
 
@@ -2309,5 +2336,22 @@ textarea {
     .analytics-popover {
         width: calc(100vw - 32px);
         max-width: 300px;
+    }
+
+    /* Confirmed live: on a long scrolling page (Settings) this card sits
+       fixed on screen and visibly covers whatever real content scrolls
+       underneath it — a real supervisor scrolling to "Save business
+       hours" found the button obscured. Clicks already pass through to
+       whatever's underneath (see .readiness-checklist's own pointer-events
+       fix), so this isn't blocking, just hard to read/notice — shrinking
+       it is the safe, proportionate improvement; a fuller fix (e.g.
+       auto-collapsing sooner) would change this card's deliberate
+       "stays open while something's actually wrong" behavior, which is a
+       product decision, not a CSS bug. .floating-analytics is hidden at
+       this width, so this only needs to clear the dialer FAB, not both. */
+    .readiness-checklist {
+        width: 200px;
+        font-size: 0.85em;
+        bottom: calc(90px + env(safe-area-inset-bottom));
     }
 }
