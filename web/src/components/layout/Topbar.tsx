@@ -12,6 +12,7 @@ const TITLES: Record<string, string> = {
     '/queue': 'Live Queue',
     '/calls': 'Calls',
     '/tickets': 'Tags & Tickets',
+    '/contacts': 'Contacts',
     '/analytics': 'Analytics',
     '/agents': 'Agents',
     '/ivr': 'IVR Builder',

@@ -771,6 +771,13 @@ tr:not(:last-child) td {
 }
 
 .status-dropdown-select {
+    /* Overrides the generic `select { width: 100% }` form-control default
+       below — that rule fighting this element's auto-sized flex parent
+       (.status-dropdown has no explicit width, it sizes to its child) was
+       collapsing the select down to a couple of characters, clipping
+       "High"/"Resolved"/etc. to "Hig"/"R" with no ellipsis. Found live on
+       the Tickets page. */
+    width: auto;
     appearance: none;
     -webkit-appearance: none;
     background: transparent;
@@ -1066,7 +1073,12 @@ textarea {
    a person would actually mean to hit. */
 .readiness-checklist {
     position: fixed;
-    bottom: 20px;
+    /* 90px, not 20px — .floating-dialer and .floating-analytics both sit at
+       bottom:24px in the same row, and this card's 260px width covered
+       both of them at the old value (visible live: the dialer FAB and the
+       "Today's Stats" pill were both half-hidden behind this card). Sits
+       in its own row above them instead. */
+    bottom: 90px;
     right: 20px;
     width: 260px;
     background: var(--surface);
@@ -1074,7 +1086,11 @@ textarea {
     border-radius: 10px;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
     padding: var(--space-12) var(--space-14);
-    z-index: 200;
+    /* Below .modal-overlay (100) deliberately — this is an ambient status
+       toast, not a dialog, and had no business rendering above a real
+       modal (found live: it was z-index 200, so it could sit visually on
+       top of an open "Add Agent"/confirm dialog instead of behind it). */
+    z-index: 90;
     animation: toast-in 0.2s ease;
     pointer-events: none;
 }
@@ -1207,7 +1223,10 @@ textarea {
     width: 24px;
     height: 24px;
     border-radius: 6px;
-    background: var(--ink);
+    /* Same fix as .fab-analytics above — var(--ink) flips to near-white in
+       dark mode (it's a text-color token), which would make this badge
+       white-on-white there too. */
+    background: var(--brand-dark);
     color: white;
     display: flex;
     align-items: center;
@@ -1524,7 +1543,14 @@ textarea {
 }
 
 .fab-analytics {
-    background: var(--ink);
+    /* var(--brand-dark), not var(--ink) — --ink's whole role is text
+       color, so it deliberately flips to near-white in dark mode (correct
+       for text, wrong for a background). This badge is meant to always
+       look the same regardless of theme, so it needs a token that stays
+       fixed — same reasoning already documented for --status-neutral
+       elsewhere in this file. Found live: this pill went white-on-white
+       in dark mode. */
+    background: var(--brand-dark);
     color: white;
     border-radius: 20px;
     padding: var(--space-10) var(--space-16);
@@ -2243,6 +2269,14 @@ textarea {
     .floating-dialer {
         right: 16px;
         bottom: calc(20px + env(safe-area-inset-bottom));
+    }
+
+    /* .floating-analytics moved above .floating-dialer at this width — the
+       checklist needs to clear both stacked on top of each other, not just
+       one row. */
+    .readiness-checklist {
+        right: 16px;
+        bottom: calc(160px + env(safe-area-inset-bottom));
     }
 
     .toast-stack {
