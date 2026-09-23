@@ -1055,6 +1055,15 @@ textarea {
 
 /* ── Readiness checklist ───────────────────────────────────────────── */
 
+/* Fixed-position over whatever page content happens to be underneath it —
+   unavoidable for any corner overlay, but this one has exactly one real
+   control (the dismiss button) and no click handler anywhere else, so
+   there's no reason for the rest of the card to block clicks on the page
+   beneath it. Found live: it sat directly over Wallet's "See transactions"
+   button and silently ate the click. pointer-events: none here, re-enabled
+   only on .readiness-dismiss below, lets a click pass through to whatever
+   the card happens to be sitting on top of, everywhere except the button
+   a person would actually mean to hit. */
 .readiness-checklist {
     position: fixed;
     bottom: 20px;
@@ -1067,6 +1076,7 @@ textarea {
     padding: var(--space-12) var(--space-14);
     z-index: 200;
     animation: toast-in 0.2s ease;
+    pointer-events: none;
 }
 
 .readiness-checklist-header {
@@ -1086,6 +1096,7 @@ textarea {
     padding: var(--space-2);
     display: flex;
     cursor: pointer;
+    pointer-events: auto;
 }
 
 .readiness-dismiss:hover {
