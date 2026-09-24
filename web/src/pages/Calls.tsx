@@ -256,7 +256,7 @@ export default function Calls() {
                     ))}
                 </div>
 
-                <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
+                <Pagination page={page} totalPages={totalPages} onPageChange={setPage} total={total} pageSize={PAGE_SIZE} />
             </div>
 
             <CallDetailsDrawer call={detailsCall} onClose={() => setDetailsCall(null)} />

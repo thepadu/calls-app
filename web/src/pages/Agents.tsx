@@ -262,7 +262,7 @@ export default function Agents() {
                         </div>
                     ))}
                 </div>
-                <Pagination page={rosterPage} totalPages={rosterTotalPages} onPageChange={setRosterPage} />
+                <Pagination page={rosterPage} totalPages={rosterTotalPages} onPageChange={setRosterPage} total={rosterTotal} pageSize={PAGE_SIZE} />
             </div>
 
             {formOpen && (

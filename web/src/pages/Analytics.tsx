@@ -255,7 +255,7 @@ export default function Analytics() {
                             ))}
                         </div>
 
-                        <Pagination page={statsPage} totalPages={totalPages} onPageChange={setStatsPage} />
+                        <Pagination page={statsPage} totalPages={totalPages} onPageChange={setStatsPage} total={ranked.length} pageSize={PAGE_SIZE} />
                     </>
                 )}
             </div>

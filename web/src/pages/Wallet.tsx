@@ -231,7 +231,7 @@ function DayTransactions({ day }: { day: string }) {
                             </tbody>
                         </table>
                     </div>
-                    <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
+                    <Pagination page={page} totalPages={totalPages} onPageChange={setPage} total={total} pageSize={TX_PAGE_SIZE} />
                 </>
             )}
         </div>
@@ -343,7 +343,7 @@ export default function Wallet() {
                         </tbody>
                     </table>
                 </div>
-                <Pagination page={page} totalPages={totalPages} onPageChange={setPage} />
+                <Pagination page={page} totalPages={totalPages} onPageChange={setPage} total={totalDays} pageSize={DAY_PAGE_SIZE} />
             </div>
         </div>
     );

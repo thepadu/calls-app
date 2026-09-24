@@ -1659,11 +1659,8 @@ textarea {
     margin-top: var(--space-8);
 }
 
-.ticket-card-fields {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: var(--space-8);
-    margin-top: var(--space-8);
+.ticket-card-tag {
+    margin: var(--space-4) 0 0;
 }
 
 .ticket-card-date {
@@ -1718,29 +1715,6 @@ textarea {
 
 .recent-call-row:first-of-type {
     border-top: none;
-}
-
-.ticket-summary {
-    background: var(--page-bg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: var(--space-12) var(--space-14);
-    margin-bottom: var(--space-18);
-}
-
-.ticket-summary > div {
-    display: flex;
-    justify-content: space-between;
-    font-size: 12px;
-    margin-bottom: var(--space-4);
-}
-
-.ticket-summary > div:last-child {
-    margin-bottom: 0;
-}
-
-.ticket-summary span {
-    color: var(--muted);
 }
 
 .ticket-priority {

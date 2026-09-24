@@ -8,7 +8,7 @@ import { TICKET_STATUS_COLORS, TICKET_PRIORITY_COLORS, TICKET_STATUSES, TICKET_P
 import Pagination from '../components/Pagination';
 import ConfirmDialog from '../components/ConfirmDialog';
 import StatusDropdown from '../components/StatusDropdown';
-import { FileText } from 'lucide-react';
+import { Pencil } from 'lucide-react';
 
 type Call = {
     session_id: string;
@@ -33,68 +33,221 @@ type Ticket = {
 
 type Agent = { id: number; name: string };
 
-// Mirrors Calls.tsx's CallCard/.calls-mobile-list pattern — same reason:
-// an 8-column table forces heavy horizontal scrolling with no visual hint
-// there's more to see, even with .panel's own overflow-x:auto fallback.
-function TicketCard({
+const TICKETS_PAGE_SIZE = 25;
+const CALL_PICKER_PAGE_SIZE = 8;
+
+function errorMessage(err: unknown) {
+    return err instanceof Error ? err.message : 'Something went wrong';
+}
+
+// The one "detail view" convention this app has (see CallDetailsDrawer) —
+// a centered modal, not a new slide-in-drawer pattern. Consolidates what
+// used to be three separate always-live table controls (Tag, Assigned,
+// Notes) plus a standalone notes-only modal into one place, opened per
+// ticket instead of shown for every row at once.
+function TicketDetailsModal({
     ticket,
     tags,
     agents,
-    onChangeTag,
-    onChangePriority,
-    onChangeStatus,
-    onChangeAssignee,
-    onOpenNotes
+    onClose,
+    onSave,
+    saving
 }: {
     ticket: Ticket;
     tags: string[];
     agents: Agent[];
-    onChangeTag: (tag: string) => void;
+    onClose: () => void;
+    onSave: (changes: { tag: string | null; assigned_agent_id: number | null; notes: string }) => void;
+    saving: boolean;
+}) {
+    const [tag, setTag] = useState(ticket.tag ?? '');
+    const [assignedAgentId, setAssignedAgentId] = useState<number | ''>(ticket.assigned_agent_id ?? '');
+    const [notes, setNotes] = useState(ticket.notes ?? '');
+    const containerRef = useModalA11y(true, onClose);
+
+    return (
+        <div className="modal-overlay" onClick={onClose}>
+            <div ref={containerRef} className="modal" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
+                <h3>TCK-{ticket.id}</h3>
+                <p className="hint">
+                    {ticket.caller_number ?? ticket.caller_name ?? '—'} · {new Date(ticket.created_at).toLocaleString()}
+                </p>
+
+                <label>
+                    Tag
+                    <select value={tag} onChange={e => setTag(e.target.value)}>
+                        <option value="">No tag</option>
+                        {tags.map(t => <option key={t} value={t}>{t}</option>)}
+                    </select>
+                </label>
+                <label>
+                    Assigned to
+                    <select value={assignedAgentId} onChange={e => setAssignedAgentId(e.target.value ? Number(e.target.value) : '')}>
+                        <option value="">Unassigned</option>
+                        {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                    </select>
+                </label>
+                <label>
+                    Notes
+                    <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={4} placeholder="What happened on this call…" autoFocus />
+                </label>
+
+                <div className="modal-actions">
+                    <button className="btn btn-secondary" onClick={onClose}>Cancel</button>
+                    <button
+                        className="btn btn-primary"
+                        disabled={saving}
+                        onClick={() => onSave({ tag: tag || null, assigned_agent_id: assignedAgentId || null, notes })}
+                    >
+                        Save
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+// Mirrors Calls.tsx's CallCard/.calls-mobile-list pattern — a stacked card
+// per ticket instead of a table row, swapped in under the same 880px
+// breakpoint. Same 6 fields as the desktop table: Priority/Status stay
+// live-editable (the actual frequent triage workflow), everything else
+// opens the details modal above.
+function TicketCard({
+    ticket,
+    onChangePriority,
+    onChangeStatus,
+    onOpenDetails
+}: {
+    ticket: Ticket;
     onChangePriority: (priority: string) => void;
     onChangeStatus: (status: string) => void;
-    onChangeAssignee: (agentId: number | null) => void;
-    onOpenNotes: () => void;
+    onOpenDetails: () => void;
 }) {
     return (
         <div className="ticket-card">
             <div className="ticket-card-top">
                 <span className="hint">TCK-{ticket.id}</span>
                 <span className="ticket-card-caller">{ticket.caller_number ?? ticket.caller_name ?? '—'}</span>
-                <button
-                    className="btn btn-link"
-                    title={ticket.notes ?? 'Add notes'}
-                    onClick={onOpenNotes}
-                    style={{ color: ticket.notes ? 'var(--brand-text)' : undefined }}
-                >
-                    <FileText size={16} />
+                <button className="btn btn-link" title="View/edit details" onClick={onOpenDetails}>
+                    <Pencil size={16} />
                 </button>
             </div>
+            {ticket.tag && <div className="hint ticket-card-tag">{ticket.tag}</div>}
             <div className="ticket-card-badges">
                 <StatusDropdown value={ticket.priority} options={TICKET_PRIORITIES} colors={TICKET_PRIORITY_COLORS} onChange={onChangePriority} />
                 <StatusDropdown value={ticket.status} options={TICKET_STATUSES} colors={TICKET_STATUS_COLORS} onChange={onChangeStatus} />
-            </div>
-            <div className="ticket-card-fields">
-                <select value={ticket.tag ?? ''} onChange={e => onChangeTag(e.target.value)}>
-                    <option value="">No tag</option>
-                    {tags.map(tg => <option key={tg} value={tg}>{tg}</option>)}
-                </select>
-                <select
-                    value={ticket.assigned_agent_id ?? ''}
-                    onChange={e => onChangeAssignee(e.target.value ? Number(e.target.value) : null)}
-                >
-                    <option value="">Unassigned</option>
-                    {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-                </select>
             </div>
             <div className="hint ticket-card-date">{new Date(ticket.created_at).toLocaleString()}</div>
         </div>
     );
 }
 
-const RECENT_CALLS_PAGE_SIZE = 8;
+// The one primary action for this page (Gmail/Cloud-Console pattern:
+// a button above the table, not a permanent side panel) — picking a recent
+// call and filling in the new ticket's fields, both in one modal instead of
+// two always-visible panels ("Recent calls" + "New ticket").
+function NewTicketModal({
+    tags,
+    agents,
+    onClose,
+    onCreate,
+    creating
+}: {
+    tags: string[];
+    agents: Agent[];
+    onClose: () => void;
+    onCreate: (data: { call: Call; tag: string; priority: string; assignedAgentId: number | ''; notes: string }) => void;
+    creating: boolean;
+}) {
+    const [callSearchDraft, setCallSearchDraft] = useState('');
+    const [callSearch, setCallSearch] = useState('');
+    const [selectedSessionId, setSelectedSessionId] = useState('');
+    const [tag, setTag] = useState('');
+    const [priority, setPriority] = useState('Medium');
+    const [assignedAgentId, setAssignedAgentId] = useState<number | ''>('');
+    const [notes, setNotes] = useState('');
+    const containerRef = useModalA11y(true, onClose);
 
-function errorMessage(err: unknown) {
-    return err instanceof Error ? err.message : 'Something went wrong';
+    const callParams = new URLSearchParams({ pageSize: String(CALL_PICKER_PAGE_SIZE) });
+    if (callSearch) callParams.set('caller', callSearch);
+    const { data: callsData, isLoading, isError } = useQuery({
+        queryKey: ['calls', 'ticket-picker', callSearch],
+        queryFn: () => apiFetch(`/api/calls?${callParams.toString()}`)
+    });
+    const calls: Call[] = callsData?.calls ?? [];
+    const selectedCall = calls.find(c => c.session_id === selectedSessionId) ?? null;
+
+    return (
+        <div className="modal-overlay" onClick={onClose}>
+            <div ref={containerRef} className="modal" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
+                <h3>New ticket</h3>
+
+                <label>
+                    Find a recent call
+                    <input
+                        value={callSearchDraft}
+                        onChange={e => setCallSearchDraft(e.target.value)}
+                        onKeyDown={e => e.key === 'Enter' && setCallSearch(callSearchDraft.trim())}
+                        onBlur={() => setCallSearch(callSearchDraft.trim())}
+                        placeholder="Search by caller number…"
+                    />
+                </label>
+                <label>
+                    Call
+                    <select value={selectedSessionId} onChange={e => setSelectedSessionId(e.target.value)}>
+                        <option value="">
+                            {isLoading ? 'Loading…' : isError ? "Couldn't load calls" : calls.length === 0 ? 'No matching calls' : 'Select…'}
+                        </option>
+                        {calls.map(c => (
+                            <option key={c.session_id} value={c.session_id}>
+                                {c.caller} — {new Date(c.created_at).toLocaleString()}
+                            </option>
+                        ))}
+                    </select>
+                </label>
+
+                {selectedCall && (
+                    <>
+                        <label>
+                            Tag
+                            <select value={tag} onChange={e => setTag(e.target.value)}>
+                                <option value="">Select…</option>
+                                {tags.map(t => <option key={t} value={t}>{t}</option>)}
+                            </select>
+                        </label>
+                        <label>
+                            Priority
+                            <select value={priority} onChange={e => setPriority(e.target.value)}>
+                                {TICKET_PRIORITIES.map(p => <option key={p} value={p}>{p}</option>)}
+                            </select>
+                        </label>
+                        <label>
+                            Assign to agent
+                            <select value={assignedAgentId} onChange={e => setAssignedAgentId(e.target.value ? Number(e.target.value) : '')}>
+                                <option value="">Unassigned</option>
+                                {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                            </select>
+                        </label>
+                        <label>
+                            Notes
+                            <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={3} placeholder="What happened on this call…" />
+                        </label>
+                    </>
+                )}
+
+                <div className="modal-actions">
+                    <button className="btn btn-secondary" onClick={onClose}>Cancel</button>
+                    <button
+                        className="btn btn-primary"
+                        disabled={!selectedCall || creating}
+                        onClick={() => selectedCall && onCreate({ call: selectedCall, tag, priority, assignedAgentId, notes })}
+                    >
+                        Create ticket
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
 }
 
 export default function Tickets() {
@@ -107,7 +260,6 @@ export default function Tickets() {
     const [tagFilter, setTagFilter] = useState('');
     const [searchDraft, setSearchDraft] = useState('');
     const [search, setSearch] = useState('');
-    const [recentCallsPage, setRecentCallsPage] = useState(1);
 
     function changeStatusFilter(value: string) {
         setStatusFilter(value);
@@ -134,17 +286,11 @@ export default function Tickets() {
         setTicketsPage(1);
     }
 
-    const ticketsParams = new URLSearchParams({ page: String(ticketsPage), pageSize: '25' });
+    const ticketsParams = new URLSearchParams({ page: String(ticketsPage), pageSize: String(TICKETS_PAGE_SIZE) });
     if (statusFilter) ticketsParams.set('status', statusFilter);
     if (tagFilter) ticketsParams.set('tag', tagFilter);
     if (search) ticketsParams.set('q', search);
 
-    const recentCallsParams = new URLSearchParams({ page: String(recentCallsPage), pageSize: String(RECENT_CALLS_PAGE_SIZE) });
-
-    const { data: callsData, isLoading: callsLoading, isError: callsIsError } = useQuery({
-        queryKey: ['calls', 'recent', recentCallsPage],
-        queryFn: () => apiFetch(`/api/calls?${recentCallsParams.toString()}`)
-    });
     const { data: ticketsData, isLoading: ticketsLoading, isError: ticketsIsError } = useQuery({
         queryKey: ['tickets', ticketsPage, statusFilter, tagFilter, search],
         queryFn: () => apiFetch(`/api/tickets?${ticketsParams.toString()}`)
@@ -152,16 +298,12 @@ export default function Tickets() {
     const { data: tagsData } = useQuery({ queryKey: ['ticket-tags'], queryFn: () => apiFetch('/api/ticket-tags') });
     const { data: agentsData } = useQuery({ queryKey: ['agents-assignable'], queryFn: () => apiFetch('/api/agents/assignable') });
 
-    const recentCalls: Call[] = callsData?.calls ?? [];
-    const recentCallsTotal: number = callsData?.total ?? 0;
-    const recentCallsTotalPages: number = callsData?.totalPages ?? 1;
     const tickets: Ticket[] = ticketsData?.tickets ?? [];
     const ticketsTotal: number = ticketsData?.total ?? 0;
     const ticketsTotalPages: number = ticketsData?.totalPages ?? 1;
     const tags: string[] = tagsData?.tags ?? [];
     const agents: Agent[] = agentsData?.agents ?? [];
 
-    const recentCallsStatusMessage = callsIsError ? "Couldn't load calls." : callsLoading ? 'Loading…' : recentCalls.length === 0 ? 'No calls yet.' : null;
     const ticketsStatusMessage = ticketsIsError
         ? "Couldn't load tickets."
         : ticketsLoading
@@ -170,27 +312,15 @@ export default function Tickets() {
         ? `No tickets${statusFilter || tagFilter || search ? ' match these filters.' : ' yet.'}`
         : null;
 
-    const [selectedCall, setSelectedCall] = useState<Call | null>(null);
-    const [tag, setTag] = useState('');
-    const [priority, setPriority] = useState('Medium');
-    const [assignedAgentId, setAssignedAgentId] = useState<number | ''>('');
-    const [notes, setNotes] = useState('');
-
-    function selectCall(call: Call) {
-        setSelectedCall(call);
-        setTag('');
-        setPriority('Medium');
-        setAssignedAgentId('');
-        setNotes('');
-    }
+    const [newTicketOpen, setNewTicketOpen] = useState(false);
 
     const createTicket = useMutation({
-        mutationFn: () =>
+        mutationFn: ({ call, tag, priority, assignedAgentId, notes }: { call: Call; tag: string; priority: string; assignedAgentId: number | ''; notes: string }) =>
             apiFetch('/api/tickets', {
                 method: 'POST',
                 body: JSON.stringify({
-                    session_id: selectedCall?.session_id,
-                    caller_number: selectedCall?.caller,
+                    session_id: call.session_id,
+                    caller_number: call.caller,
                     tag: tag || (tags[0] ?? null),
                     priority,
                     assigned_agent_id: assignedAgentId || null,
@@ -199,20 +329,17 @@ export default function Tickets() {
             }),
         onSuccess: () => {
             showToast('Ticket created');
-            setSelectedCall(null);
+            setNewTicketOpen(false);
             queryClient.invalidateQueries({ queryKey: ['tickets'] });
         },
         onError: (err: unknown) => showToast(errorMessage(err), 'error')
     });
 
-    // PATCH /api/tickets/:id has always existed, fully built and validated —
-    // this was just never wired up to anything, so a ticket's status could
-    // never actually change after creation anywhere in the app.
-    // No success toast — these fire on every inline tag/priority/status/
-    // assignee dropdown change and the row itself already visually updates,
-    // so a stacked toast per field is noise rather than new information,
-    // especially when triaging several tickets in a row. A failed save is
-    // still worth surfacing, so the error toast stays.
+    // No success toast — these fire on every inline priority/status change
+    // (and every details-modal save) and the row itself already visually
+    // updates, so a stacked toast per field is noise rather than new
+    // information, especially when triaging several tickets in a row. A
+    // failed save is still worth surfacing, so the error toast stays.
     const updateTicket = useMutation({
         mutationFn: ({ id, ...changes }: { id: number; status?: string; priority?: string; tag?: string | null; assigned_agent_id?: number | null; notes?: string }) =>
             apiFetch(`/api/tickets/${id}`, { method: 'PATCH', body: JSON.stringify(changes) }),
@@ -220,22 +347,12 @@ export default function Tickets() {
         onError: (err: unknown) => showToast(errorMessage(err), 'error')
     });
 
-    const [editingNotesTicket, setEditingNotesTicket] = useState<Ticket | null>(null);
-    const [notesDraft, setNotesDraft] = useState('');
+    const [detailsTicket, setDetailsTicket] = useState<Ticket | null>(null);
 
-    function openNotesEditor(t: Ticket) {
-        setEditingNotesTicket(t);
-        setNotesDraft(t.notes ?? '');
+    function saveDetails(changes: { tag: string | null; assigned_agent_id: number | null; notes: string }) {
+        if (!detailsTicket) return;
+        updateTicket.mutate({ id: detailsTicket.id, ...changes }, { onSuccess: () => setDetailsTicket(null) });
     }
-
-    function saveNotes() {
-        if (!editingNotesTicket) return;
-        updateTicket.mutate({ id: editingNotesTicket.id, notes: notesDraft }, {
-            onSuccess: () => setEditingNotesTicket(null)
-        });
-    }
-
-    const notesModalRef = useModalA11y(!!editingNotesTicket, () => setEditingNotesTicket(null));
 
     const [addTagOpen, setAddTagOpen] = useState(false);
     const [newTagName, setNewTagName] = useState('');
@@ -250,7 +367,6 @@ export default function Tickets() {
         mutationFn: () => apiFetch('/api/ticket-tags', { method: 'POST', body: JSON.stringify({ name: newTagName.trim() }) }),
         onSuccess: () => {
             showToast('Tag added');
-            setAddTagOpen(false);
             setNewTagName('');
             setAddTagError('');
             invalidateTags();
@@ -271,147 +387,133 @@ export default function Tickets() {
     const addTagModalRef = useModalA11y(addTagOpen, () => setAddTagOpen(false));
 
     return (
-        <div className="ivr-layout">
-            <div>
-                <div className="panel">
-                    <h3>Recent calls {recentCallsTotal > 0 && <span className="hint" style={{ fontWeight: 400 }}>({recentCallsTotal})</span>}</h3>
-                    {recentCallsStatusMessage && <p className="empty">{recentCallsStatusMessage}</p>}
-                    {recentCalls.map(call => (
-                        <div className="recent-call-row" key={call.session_id}>
-                            <div>
-                                <div style={{ fontWeight: 600 }}>{call.caller}</div>
-                                <div className="hint" style={{ margin: 0 }}>
-                                    {call.duration ?? 0}s · {new Date(call.created_at).toLocaleString()}
-                                </div>
-                            </div>
-                            <button className="btn btn-secondary" onClick={() => selectCall(call)}>
-                                + Ticket
-                            </button>
-                        </div>
-                    ))}
-                    <Pagination page={recentCallsPage} totalPages={recentCallsTotalPages} onPageChange={setRecentCallsPage} />
+        <div className="page-narrow">
+            <div className="panel">
+                <div className="panel-header">
+                    <h3>Tickets {ticketsTotal > 0 && <span className="hint" style={{ fontWeight: 400 }}>({ticketsTotal})</span>}</h3>
+                    <button className="btn btn-primary" onClick={() => setNewTicketOpen(true)}>+ New ticket</button>
                 </div>
 
-                <div className="panel">
-                    <div className="panel-header">
-                        <h3>Tickets {ticketsTotal > 0 && <span className="hint" style={{ fontWeight: 400 }}>({ticketsTotal})</span>}</h3>
-                        <div className="calls-filter-actions">
-                            <input
-                                value={searchDraft}
-                                onChange={e => setSearchDraft(e.target.value)}
-                                onKeyDown={e => e.key === 'Enter' && applySearch()}
-                                onBlur={applySearch}
-                                placeholder="Search by caller…"
-                                style={{ width: 140 }}
-                            />
-                            <select value={statusFilter} onChange={e => changeStatusFilter(e.target.value)}>
-                                <option value="">All statuses</option>
-                                {TICKET_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
-                            </select>
-                            <select value={tagFilter} onChange={e => changeTagFilter(e.target.value)}>
-                                <option value="">All tags</option>
-                                {tags.map(t => <option key={t} value={t}>{t}</option>)}
-                            </select>
-                            {filtersActive && (
-                                <button className="btn btn-secondary" onClick={clearFilters}>Clear</button>
-                            )}
-                        </div>
-                    </div>
-                    <table className="tickets-table">
-                        <thead>
-                            <tr>
-                                <th>ID</th>
-                                <th>Caller</th>
-                                <th>Tag</th>
-                                <th>Priority</th>
-                                <th>Status</th>
-                                <th>Assigned</th>
-                                <th>Notes</th>
-                                <th>Created</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {ticketsStatusMessage && (
-                                <tr><td colSpan={8} className="empty">{ticketsStatusMessage}</td></tr>
-                            )}
-                            {tickets.map(t => (
-                                <tr key={t.id}>
-                                    <td className="hint">TCK-{t.id}</td>
-                                    <td>{t.caller_number ?? t.caller_name ?? '—'}</td>
-                                    <td>
-                                        <select value={t.tag ?? ''} onChange={e => updateTicket.mutate({ id: t.id, tag: e.target.value || null })}>
-                                            <option value="">No tag</option>
-                                            {tags.map(tg => <option key={tg} value={tg}>{tg}</option>)}
-                                        </select>
-                                    </td>
-                                    <td>
-                                        <StatusDropdown
-                                            value={t.priority}
-                                            options={TICKET_PRIORITIES}
-                                            colors={TICKET_PRIORITY_COLORS}
-                                            onChange={priority => updateTicket.mutate({ id: t.id, priority })}
-                                        />
-                                    </td>
-                                    <td>
-                                        <StatusDropdown
-                                            value={t.status}
-                                            options={TICKET_STATUSES}
-                                            colors={TICKET_STATUS_COLORS}
-                                            onChange={status => updateTicket.mutate({ id: t.id, status })}
-                                        />
-                                    </td>
-                                    <td>
-                                        <select
-                                            value={t.assigned_agent_id ?? ''}
-                                            onChange={e => updateTicket.mutate({ id: t.id, assigned_agent_id: e.target.value ? Number(e.target.value) : null })}
-                                        >
-                                            <option value="">Unassigned</option>
-                                            {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-                                        </select>
-                                    </td>
-                                    <td>
-                                        <button
-                                            className="btn btn-link"
-                                            title={t.notes ?? 'Add notes'}
-                                            onClick={() => openNotesEditor(t)}
-                                            style={{ color: t.notes ? 'var(--brand-text)' : undefined }}
-                                        >
-                                            <FileText size={16} />
-                                        </button>
-                                    </td>
-                                    <td className="hint">{new Date(t.created_at).toLocaleString()}</td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
+                <div className="calls-filter-actions">
+                    <input
+                        value={searchDraft}
+                        onChange={e => setSearchDraft(e.target.value)}
+                        onKeyDown={e => e.key === 'Enter' && applySearch()}
+                        onBlur={applySearch}
+                        placeholder="Search by caller…"
+                        style={{ width: 140 }}
+                    />
+                    <select value={statusFilter} onChange={e => changeStatusFilter(e.target.value)}>
+                        <option value="">All statuses</option>
+                        {TICKET_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                    <select value={tagFilter} onChange={e => changeTagFilter(e.target.value)}>
+                        <option value="">All tags</option>
+                        {tags.map(t => <option key={t} value={t}>{t}</option>)}
+                    </select>
+                    {filtersActive && (
+                        <button className="btn btn-secondary" onClick={clearFilters}>Clear</button>
+                    )}
+                    {isSupervisor && (
+                        <button className="btn btn-link" onClick={() => setAddTagOpen(true)} style={{ marginLeft: 'auto' }}>
+                            Manage tags
+                        </button>
+                    )}
+                </div>
 
-                    <div className="tickets-mobile-list">
-                        {ticketsStatusMessage && <p className="empty">{ticketsStatusMessage}</p>}
+                <table className="tickets-table">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Caller</th>
+                            <th>Priority</th>
+                            <th>Status</th>
+                            <th>Created</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {ticketsStatusMessage && (
+                            <tr><td colSpan={6} className="empty">{ticketsStatusMessage}</td></tr>
+                        )}
                         {tickets.map(t => (
-                            <TicketCard
-                                key={t.id}
-                                ticket={t}
-                                tags={tags}
-                                agents={agents}
-                                onChangeTag={tag => updateTicket.mutate({ id: t.id, tag: tag || null })}
-                                onChangePriority={priority => updateTicket.mutate({ id: t.id, priority })}
-                                onChangeStatus={status => updateTicket.mutate({ id: t.id, status })}
-                                onChangeAssignee={assigned_agent_id => updateTicket.mutate({ id: t.id, assigned_agent_id })}
-                                onOpenNotes={() => openNotesEditor(t)}
-                            />
+                            <tr key={t.id}>
+                                <td className="hint">TCK-{t.id}</td>
+                                <td>
+                                    {t.caller_number ?? t.caller_name ?? '—'}
+                                    {t.tag && <div className="hint" style={{ margin: 0 }}>{t.tag}</div>}
+                                </td>
+                                <td>
+                                    <StatusDropdown
+                                        value={t.priority}
+                                        options={TICKET_PRIORITIES}
+                                        colors={TICKET_PRIORITY_COLORS}
+                                        onChange={priority => updateTicket.mutate({ id: t.id, priority })}
+                                    />
+                                </td>
+                                <td>
+                                    <StatusDropdown
+                                        value={t.status}
+                                        options={TICKET_STATUSES}
+                                        colors={TICKET_STATUS_COLORS}
+                                        onChange={status => updateTicket.mutate({ id: t.id, status })}
+                                    />
+                                </td>
+                                <td className="hint">{new Date(t.created_at).toLocaleString()}</td>
+                                <td>
+                                    <button className="btn btn-link" title="View/edit details" onClick={() => setDetailsTicket(t)}>
+                                        <Pencil size={16} />
+                                    </button>
+                                </td>
+                            </tr>
                         ))}
-                    </div>
+                    </tbody>
+                </table>
 
-                    <Pagination page={ticketsPage} totalPages={ticketsTotalPages} onPageChange={setTicketsPage} />
+                <div className="tickets-mobile-list">
+                    {ticketsStatusMessage && <p className="empty">{ticketsStatusMessage}</p>}
+                    {tickets.map(t => (
+                        <TicketCard
+                            key={t.id}
+                            ticket={t}
+                            onChangePriority={priority => updateTicket.mutate({ id: t.id, priority })}
+                            onChangeStatus={status => updateTicket.mutate({ id: t.id, status })}
+                            onOpenDetails={() => setDetailsTicket(t)}
+                        />
+                    ))}
                 </div>
 
-                {isSupervisor && (
-                    <div className="panel">
-                        <div className="panel-header">
-                            <h3>Ticket tags</h3>
-                            <button className="btn btn-primary" onClick={() => setAddTagOpen(true)}>+ Add tag</button>
-                        </div>
+                <Pagination page={ticketsPage} totalPages={ticketsTotalPages} onPageChange={setTicketsPage} total={ticketsTotal} pageSize={TICKETS_PAGE_SIZE} />
+            </div>
+
+            {newTicketOpen && (
+                <NewTicketModal
+                    tags={tags}
+                    agents={agents}
+                    onClose={() => setNewTicketOpen(false)}
+                    onCreate={data => createTicket.mutate(data)}
+                    creating={createTicket.isPending}
+                />
+            )}
+
+            {detailsTicket && (
+                <TicketDetailsModal
+                    key={detailsTicket.id}
+                    ticket={detailsTicket}
+                    tags={tags}
+                    agents={agents}
+                    onClose={() => setDetailsTicket(null)}
+                    onSave={saveDetails}
+                    saving={updateTicket.isPending}
+                />
+            )}
+
+            {addTagOpen && (
+                <div className="modal-overlay" onClick={() => setAddTagOpen(false)}>
+                    <div ref={addTagModalRef} className="modal" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
+                        <h3>Manage ticket tags</h3>
                         <p className="hint">These are the tags agents can pick from when logging a ticket.</p>
+
                         {tags.length === 0 && <p className="empty">No tags yet — add one to get started.</p>}
                         {tags.map(t => (
                             <div className="recent-call-row" key={t}>
@@ -421,86 +523,15 @@ export default function Tickets() {
                                 </button>
                             </div>
                         ))}
-                    </div>
-                )}
-            </div>
 
-            <div className="panel">
-                <h3>New ticket</h3>
-                {!selectedCall && (
-                    <p className="hint">Pick a call on the left to start a ticket for it.</p>
-                )}
-                {selectedCall && (
-                    <div>
-                        <div className="ticket-summary">
-                            <div><span>Caller</span><strong>{selectedCall.caller}</strong></div>
-                            <div><span>Duration</span><strong>{selectedCall.duration ?? 0}s</strong></div>
-                        </div>
-
-                        <label>
-                            Tag
-                            <select value={tag} onChange={e => setTag(e.target.value)}>
-                                <option value="">Select…</option>
-                                {tags.map(t => <option key={t} value={t}>{t}</option>)}
-                            </select>
-                        </label>
-                        <label>
-                            Priority
-                            <select value={priority} onChange={e => setPriority(e.target.value)}>
-                                {TICKET_PRIORITIES.map(p => <option key={p} value={p}>{p}</option>)}
-                            </select>
-                        </label>
-                        <label>
-                            Assign to agent
-                            <select value={assignedAgentId} onChange={e => setAssignedAgentId(e.target.value ? Number(e.target.value) : '')}>
-                                <option value="">Unassigned</option>
-                                {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-                            </select>
-                        </label>
-                        <label>
-                            Notes
-                            <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={3} placeholder="What happened on this call..." />
-                        </label>
-
-                        <div className="modal-actions" style={{ justifyContent: 'flex-start' }}>
-                            <button className="btn btn-primary" onClick={() => createTicket.mutate()} disabled={createTicket.isPending}>
-                                Create ticket
-                            </button>
-                            <button className="btn btn-secondary" onClick={() => setSelectedCall(null)}>Cancel</button>
-                        </div>
-                    </div>
-                )}
-            </div>
-
-            {editingNotesTicket && (
-                <div className="modal-overlay" onClick={() => setEditingNotesTicket(null)}>
-                    <div ref={notesModalRef} className="modal" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
-                        <h3>Notes — TCK-{editingNotesTicket.id}</h3>
-                        <label>
-                            Notes
-                            <textarea value={notesDraft} onChange={e => setNotesDraft(e.target.value)} rows={5} placeholder="What happened on this call..." autoFocus />
-                        </label>
-                        <div className="modal-actions">
-                            <button className="btn btn-secondary" onClick={() => setEditingNotesTicket(null)}>Cancel</button>
-                            <button className="btn btn-primary" onClick={saveNotes} disabled={updateTicket.isPending}>
-                                Save
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {addTagOpen && (
-                <div className="modal-overlay" onClick={() => setAddTagOpen(false)}>
-                    <div ref={addTagModalRef} className="modal" role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
-                        <h3>Add ticket tag</h3>
-                        <label>
-                            Tag name
-                            <input value={newTagName} onChange={e => setNewTagName(e.target.value)} autoFocus />
+                        <label style={{ marginTop: 14 }}>
+                            New tag name
+                            <input value={newTagName} onChange={e => setNewTagName(e.target.value)} />
                         </label>
                         {addTagError && <p className="error">{addTagError}</p>}
+
                         <div className="modal-actions">
-                            <button className="btn btn-secondary" onClick={() => setAddTagOpen(false)}>Cancel</button>
+                            <button className="btn btn-secondary" onClick={() => setAddTagOpen(false)}>Close</button>
                             <button className="btn btn-primary" onClick={() => addTag.mutate()} disabled={addTag.isPending || !newTagName.trim()}>
                                 Add
                             </button>
