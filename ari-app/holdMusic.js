@@ -36,16 +36,41 @@ async function writeCustomTrack(audioBuffer) {
         throw new Error(`Audio exceeds the ${MAX_AUDIO_BYTES}-byte cap`);
     }
     fs.mkdirSync(MOH_CUSTOM_DIR, { recursive: true });
+
+    // Snapshot whatever's currently live (if anything) before overwriting,
+    // so a failed verify below can restore it — the same rollback
+    // discipline pjsipConfig.js's applyAndVerify uses for pjsip.conf, just
+    // for a binary file. Without this, every caller placed on hold after a
+    // failed upload got whatever the new, unverified file produced, with no
+    // way back to the previous known-good audio short of re-uploading it.
+    const previousPath = path.join(MOH_CUSTOM_DIR, `.hold.mp3.previous-${crypto.randomUUID()}`);
+    const hadPrevious = fs.existsSync(MOH_CUSTOM_FILE);
+    if (hadPrevious) {
+        fs.copyFileSync(MOH_CUSTOM_FILE, previousPath);
+    }
+
     const tmpPath = path.join(MOH_CUSTOM_DIR, `.hold.mp3.tmp-${crypto.randomUUID()}`);
     fs.writeFileSync(tmpPath, audioBuffer);
     fs.renameSync(tmpPath, MOH_CUSTOM_FILE);
 
-    await execFileP('asterisk', ['-rx', 'moh reload']);
-    const { stdout } = await execFileP('asterisk', ['-rx', 'moh show classes']);
-    if (!/Class:\s*custom\b/.test(stdout)) {
-        throw new Error(
-            "Wrote the file but Asterisk doesn't report a 'custom' MOH class after reload — check the [custom] stanza in /etc/asterisk/musiconhold.conf"
-        );
+    try {
+        await execFileP('asterisk', ['-rx', 'moh reload']);
+        const { stdout } = await execFileP('asterisk', ['-rx', 'moh show classes']);
+        if (!/Class:\s*custom\b/.test(stdout)) {
+            throw new Error(
+                "Wrote the file but Asterisk doesn't report a 'custom' MOH class after reload — check the [custom] stanza in /etc/asterisk/musiconhold.conf"
+            );
+        }
+    } catch (err) {
+        if (hadPrevious) {
+            fs.renameSync(previousPath, MOH_CUSTOM_FILE);
+            await execFileP('asterisk', ['-rx', 'moh reload']).catch(() => {});
+        } else {
+            fs.unlinkSync(MOH_CUSTOM_FILE);
+        }
+        throw err;
+    } finally {
+        fs.rmSync(previousPath, { force: true });
     }
 }
 

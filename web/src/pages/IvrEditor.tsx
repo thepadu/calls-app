@@ -378,6 +378,7 @@ export default function IvrEditor() {
                 }
                 confirmLabel="Remove"
                 danger
+                confirmDisabled={deleteOption.isPending}
                 onConfirm={() => pendingDelete && deleteOption.mutate(pendingDelete.digit)}
                 onCancel={() => setPendingDelete(null)}
             />

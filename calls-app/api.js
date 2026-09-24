@@ -134,6 +134,23 @@ async function checkAgentLiveOnAsterisk(agentId) {
     }
 }
 
+// Serializes concurrent requests for the same agent's SIP credentials — a
+// double-click on "Regenerate" (or a retried request) could otherwise
+// interleave two calls' deprovision/derive/write/sync steps, leaving the DB
+// holding one request's credentials while Asterisk ends up synced with the
+// other's. Exactly the credential-mismatch shape the 2026-09-24 incident
+// itself was about, just reintroduced by this route if left unguarded. One
+// Promise chain per agentId (not a single global lock) so regenerating
+// agent A never blocks a concurrent request for agent B — same shape as
+// ari-app/pjsipConfig.js's withLock, just keyed.
+const agentCredentialLocks = new Map();
+function withAgentCredentialLock(agentId, fn) {
+    const previous = agentCredentialLocks.get(agentId) || Promise.resolve();
+    const result = previous.then(fn, fn);
+    agentCredentialLocks.set(agentId, result.then(() => {}, () => {}));
+    return result;
+}
+
 // Shared by the initial provision route and the regenerate route below —
 // same server-derived-only convention (first name, lowercase, e.g. [simon]),
 // deterministically suffixed with the numeric id on a collision rather than
@@ -1280,7 +1297,10 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
             .order('id', { ascending: true });
         // Matches name OR phone — searching against two columns needs an
         // .or() rather than chained .ilike() calls (which would AND them).
-        if (q) query = query.or(`name.ilike.%${q}%,phone.ilike.%${q}%`);
+        // escapeLikePattern keeps a literal %/_ in the search term from
+        // being read as an ILIKE wildcard (same reasoning as the
+        // agent-by-email lookups elsewhere in this file).
+        if (q) query = query.or(`name.ilike.%${escapeLikePattern(q)}%,phone.ilike.%${escapeLikePattern(q)}%`);
 
         const { data, error, count } = await query.range(rangeStart, rangeStart + pageSize - 1);
 
@@ -1521,48 +1541,52 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
             return res.status(400).json({ error: 'Invalid agent id' });
         }
 
-        const { data: agent, error: agentError } = await supabase.from('agents').select('id, name').eq('id', agentId).maybeSingle();
-        if (agentError) {
-            console.error(agentError);
-            return res.status(500).json({ error: 'Failed to load agent' });
-        }
-        if (!agent) {
-            return res.status(404).json({ error: 'Agent not found' });
-        }
+        const { status, body } = await withAgentCredentialLock(agentId, async () => {
+            const { data: agent, error: agentError } = await supabase.from('agents').select('id, name').eq('id', agentId).maybeSingle();
+            if (agentError) {
+                console.error(agentError);
+                return { status: 500, body: { error: 'Failed to load agent' } };
+            }
+            if (!agent) {
+                return { status: 404, body: { error: 'Agent not found' } };
+            }
 
-        const { data: existing, error: existingError } = await supabase.from('agent_sip_credentials').select('agent_id').eq('agent_id', agentId).maybeSingle();
-        if (existingError) {
-            console.error(existingError);
-            return res.status(500).json({ error: 'Failed to load existing SIP credentials' });
-        }
-        if (!existing) {
-            return res.status(404).json({ error: 'This agent has no softphone credentials to regenerate yet — provision them first' });
-        }
+            const { data: existing, error: existingError } = await supabase.from('agent_sip_credentials').select('agent_id').eq('agent_id', agentId).maybeSingle();
+            if (existingError) {
+                console.error(existingError);
+                return { status: 500, body: { error: 'Failed to load existing SIP credentials' } };
+            }
+            if (!existing) {
+                return { status: 404, body: { error: 'This agent has no softphone credentials to regenerate yet — provision them first' } };
+            }
 
-        const deprovisionResult = await deprovisionAgentOnAsterisk(agentId);
-        if (!deprovisionResult.ok) {
-            return res.status(502).json({ error: 'Could not reach Asterisk to revoke the old credentials — nothing was changed, safe to retry' });
-        }
+            const deprovisionResult = await deprovisionAgentOnAsterisk(agentId);
+            if (!deprovisionResult.ok) {
+                return { status: 502, body: { error: 'Could not reach Asterisk to revoke the old credentials — nothing was changed, safe to retry' } };
+            }
 
-        const sipUsername = await deriveSipUsername(supabase, agentId, agent.name, agentId);
-        const sipPassword = crypto.randomBytes(18).toString('base64url');
+            const sipUsername = await deriveSipUsername(supabase, agentId, agent.name, agentId);
+            const sipPassword = crypto.randomBytes(18).toString('base64url');
 
-        const { error: updateError } = await supabase
-            .from('agent_sip_credentials')
-            .update({
-                sip_username: sipUsername,
-                sip_password: sipPassword,
-                provisioned_by_email: req.user.email,
-                asterisk_synced_at: null
-            })
-            .eq('agent_id', agentId);
-        if (updateError) {
-            console.error(updateError);
-            return res.status(500).json({ error: 'Old credentials were revoked on Asterisk but saving the new ones failed — retry this request' });
-        }
+            const { error: updateError } = await supabase
+                .from('agent_sip_credentials')
+                .update({
+                    sip_username: sipUsername,
+                    sip_password: sipPassword,
+                    provisioned_by_email: req.user.email,
+                    asterisk_synced_at: null
+                })
+                .eq('agent_id', agentId);
+            if (updateError) {
+                console.error(updateError);
+                return { status: 500, body: { error: 'Old credentials were revoked on Asterisk but saving the new ones failed — retry this request' } };
+            }
 
-        const syncResult = await syncAgentToAsterisk(supabase, agentId, sipUsername, sipPassword);
-        res.status(syncResult.ok ? 200 : 202).json({ ok: true, agentId, sipUsername, asteriskSynced: syncResult.ok });
+            const syncResult = await syncAgentToAsterisk(supabase, agentId, sipUsername, sipPassword);
+            return { status: syncResult.ok ? 200 : 202, body: { ok: true, agentId, sipUsername, asteriskSynced: syncResult.ok } };
+        });
+
+        res.status(status).json(body);
     });
 
     // ── IVR menu (supervisors only) ─────────────────────────────────────
@@ -1725,22 +1749,28 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
             .update(updates)
             .eq('digit', req.params.digit)
             .select()
-            .single();
+            .maybeSingle();
 
         if (error) {
             console.error(error);
             return res.status(500).json({ error: 'Failed to update IVR option' });
+        }
+        if (!data) {
+            return res.status(404).json({ error: 'IVR option not found' });
         }
 
         res.json({ option: data });
     });
 
     app.delete('/api/ivr-options/:digit', requireSupervisor, async (req, res) => {
-        const { error } = await supabase.from('ivr_options').delete().eq('digit', req.params.digit);
+        const { data, error } = await supabase.from('ivr_options').delete().eq('digit', req.params.digit).select();
 
         if (error) {
             console.error(error);
             return res.status(500).json({ error: 'Failed to delete IVR option' });
+        }
+        if (data.length === 0) {
+            return res.status(404).json({ error: 'IVR option not found' });
         }
 
         res.json({ ok: true });
@@ -1767,12 +1797,13 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         if (req.query.session_id) query = query.eq('session_id', req.query.session_id);
         if (req.query.status) query = query.eq('status', req.query.status);
         if (req.query.tag) query = query.eq('tag', req.query.tag);
-        // Matches caller number OR name — same .or()/sanitization pattern as
-        // GET /api/agents (strip characters PostgREST's filter syntax treats
-        // as structural, so a search term containing them fails to match
-        // instead of corrupting the filter string).
+        // Matches caller number OR name — same .or()/sanitization/escaping
+        // pattern as GET /api/agents (strip characters PostgREST's filter
+        // syntax treats as structural, so a search term containing them
+        // fails to match instead of corrupting the filter string; escape a
+        // literal %/_ so it isn't read as an ILIKE wildcard).
         const q = (typeof req.query.q === 'string' ? req.query.q : '').trim().replace(/[,()]/g, '');
-        if (q) query = query.or(`caller_number.ilike.%${q}%,caller_name.ilike.%${q}%`);
+        if (q) query = query.or(`caller_number.ilike.%${escapeLikePattern(q)}%,caller_name.ilike.%${escapeLikePattern(q)}%`);
 
         const { data, error, count } = await query;
 
@@ -2044,11 +2075,14 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
     });
 
     app.delete('/api/forwarding-rules/:id', requireSupervisor, async (req, res) => {
-        const { error } = await supabase.from('forwarding_rules').delete().eq('id', req.params.id);
+        const { data, error } = await supabase.from('forwarding_rules').delete().eq('id', req.params.id).select();
 
         if (error) {
             console.error(error);
             return res.status(500).json({ error: 'Failed to remove rule' });
+        }
+        if (data.length === 0) {
+            return res.status(404).json({ error: 'Rule not found' });
         }
 
         res.json({ ok: true });
@@ -2088,8 +2122,8 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         }
 
         if (active_days !== undefined) {
-            if (!Array.isArray(active_days) || active_days.some(d => !Number.isInteger(d) || d < 0 || d > 6)) {
-                return res.status(400).json({ error: 'Invalid active days' });
+            if (!Array.isArray(active_days) || active_days.length === 0 || active_days.some(d => !Number.isInteger(d) || d < 0 || d > 6)) {
+                return res.status(400).json({ error: 'Active days must include at least one day' });
             }
             fieldUpdates.active_days = active_days;
         }

@@ -116,12 +116,14 @@ function TicketCard({
     ticket,
     onChangePriority,
     onChangeStatus,
-    onOpenDetails
+    onOpenDetails,
+    disabled
 }: {
     ticket: Ticket;
     onChangePriority: (priority: string) => void;
     onChangeStatus: (status: string) => void;
     onOpenDetails: () => void;
+    disabled?: boolean;
 }) {
     return (
         <div className="ticket-card">
@@ -134,8 +136,8 @@ function TicketCard({
             </div>
             {ticket.tag && <div className="hint ticket-card-tag">{ticket.tag}</div>}
             <div className="ticket-card-badges">
-                <StatusDropdown value={ticket.priority} options={TICKET_PRIORITIES} colors={TICKET_PRIORITY_COLORS} onChange={onChangePriority} />
-                <StatusDropdown value={ticket.status} options={TICKET_STATUSES} colors={TICKET_STATUS_COLORS} onChange={onChangeStatus} />
+                <StatusDropdown value={ticket.priority} options={TICKET_PRIORITIES} colors={TICKET_PRIORITY_COLORS} onChange={onChangePriority} disabled={disabled} />
+                <StatusDropdown value={ticket.status} options={TICKET_STATUSES} colors={TICKET_STATUS_COLORS} onChange={onChangeStatus} disabled={disabled} />
             </div>
             <div className="hint ticket-card-date">{new Date(ticket.created_at).toLocaleString()}</div>
         </div>
@@ -449,6 +451,7 @@ export default function Tickets() {
                                         options={TICKET_PRIORITIES}
                                         colors={TICKET_PRIORITY_COLORS}
                                         onChange={priority => updateTicket.mutate({ id: t.id, priority })}
+                                        disabled={updateTicket.isPending && updateTicket.variables?.id === t.id}
                                     />
                                 </td>
                                 <td>
@@ -457,6 +460,7 @@ export default function Tickets() {
                                         options={TICKET_STATUSES}
                                         colors={TICKET_STATUS_COLORS}
                                         onChange={status => updateTicket.mutate({ id: t.id, status })}
+                                        disabled={updateTicket.isPending && updateTicket.variables?.id === t.id}
                                     />
                                 </td>
                                 <td className="hint">{new Date(t.created_at).toLocaleString()}</td>
@@ -479,6 +483,7 @@ export default function Tickets() {
                             onChangePriority={priority => updateTicket.mutate({ id: t.id, priority })}
                             onChangeStatus={status => updateTicket.mutate({ id: t.id, status })}
                             onOpenDetails={() => setDetailsTicket(t)}
+                            disabled={updateTicket.isPending && updateTicket.variables?.id === t.id}
                         />
                     ))}
                 </div>
@@ -546,6 +551,7 @@ export default function Tickets() {
                 message={`Remove the "${pendingDeleteTag}" tag? Agents will no longer be able to select it for new tickets.`}
                 confirmLabel="Remove"
                 danger
+                confirmDisabled={deleteTag.isPending}
                 onConfirm={() => pendingDeleteTag && deleteTag.mutate(pendingDeleteTag)}
                 onCancel={() => setPendingDeleteTag(null)}
             />

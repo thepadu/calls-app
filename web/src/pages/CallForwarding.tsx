@@ -424,6 +424,7 @@ export default function CallForwarding() {
                 message={`Remove the "${pendingDelete?.condition}" rule?`}
                 confirmLabel="Remove"
                 danger
+                confirmDisabled={deleteRule.isPending}
                 onConfirm={() => pendingDelete && deleteRule.mutate(pendingDelete.id)}
                 onCancel={() => setPendingDelete(null)}
             />

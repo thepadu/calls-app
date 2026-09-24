@@ -61,10 +61,23 @@ function ConfigPanel({ wallet }: { wallet: WalletRow }) {
     const [outboundKes, setOutboundKes] = useState(String(wallet.outbound_rate_micros_per_second / 1_000_000));
     const [thresholdKes, setThresholdKes] = useState(String(wallet.low_balance_threshold_cents / 100));
 
+    const configDirty =
+        inboundKes !== String(wallet.inbound_rate_micros_per_second / 1_000_000) ||
+        outboundKes !== String(wallet.outbound_rate_micros_per_second / 1_000_000) ||
+        thresholdKes !== String(wallet.low_balance_threshold_cents / 100);
+
     useEffect(() => {
+        // A refetch of the wallet query can be triggered by something
+        // totally unrelated to this form (e.g. TopUpPanel recording a
+        // top-up, or another tab doing the same) — without this guard, that
+        // refetch silently overwrote an in-progress, unsaved rate/threshold
+        // edit with the server's old values (same failure mode IvrEditor's
+        // greetingDirty guard exists to prevent for the greeting form).
+        if (configDirty) return;
         setInboundKes(String(wallet.inbound_rate_micros_per_second / 1_000_000));
         setOutboundKes(String(wallet.outbound_rate_micros_per_second / 1_000_000));
         setThresholdKes(String(wallet.low_balance_threshold_cents / 100));
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [wallet.inbound_rate_micros_per_second, wallet.outbound_rate_micros_per_second, wallet.low_balance_threshold_cents]);
 
     const save = useMutation({

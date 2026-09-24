@@ -1400,6 +1400,11 @@ async function handleOutboundAgentCall(agentChannel, destination, internalTarget
     } catch (err) {
         console.error(`❌ Failed to answer outbound agent leg ${sessionId}:`, err.message);
         await agentChannel.hangup().catch(() => {});
+        // No `pending` object exists yet at this point, so finishOutboundCall
+        // never runs for this path — an internal call's target-agent ring
+        // claim (see handleInternalAgentCall) has to be released here
+        // directly, or they'd be stuck on 'ringing' forever.
+        if (internalTarget) await setAgentStatus(internalTarget.targetAgentId, 'available', 'ringing');
         return;
     }
 
@@ -1433,8 +1438,6 @@ async function handleOutboundAgentCall(agentChannel, destination, internalTarget
             console.error('❌ Error finishing outbound call:', err.message)
         );
     });
-
-    if (pending.cleaned) return; // agent already hung up — don't dial the real destination for nothing
 
     // Gives the agent audible ringback while the destination is actually
     // ringing (confirmed via live SIP trace: the destination can genuinely
@@ -1553,6 +1556,21 @@ async function handleInternalAgentCall(agentChannel, targetAgentIdRaw) {
         return;
     }
 
+    // Compare-and-swap claim, mirroring ringOneAgent's — the plain read
+    // above only proves the target *was* available a moment ago. Without a
+    // CAS here, a concurrent ring-all fan-out (or a second internal call)
+    // targeting the same agent in that window could originate its own real
+    // PJSIP leg before this call's dial ever lands, double-booking them
+    // into two simultaneous bridges. Reverted on every non-bridged path in
+    // finishOutboundCall (and directly above in handleOutboundAgentCall's
+    // own answer() failure branch, which returns before finishOutboundCall
+    // ever runs).
+    const claimed = await setAgentStatus(targetAgentId, 'ringing', 'available');
+    if (!claimed) {
+        await reject('target agent was claimed by another call at the same moment');
+        return;
+    }
+
     await handleOutboundAgentCall(agentChannel, null, { targetAgentId, sipUsername: target.sipUsername });
 }
 
@@ -1662,13 +1680,23 @@ async function finishOutboundCall(sessionId, status) {
     await pending.agentChannel.hangup().catch(() => {});
     await pending.destChannel?.hangup().catch(() => {});
 
-    // Only revert if this call actually flipped them to on_call in the
-    // first place (completeOutboundBridge) — a call that never bridged
-    // never touched agent status, and forcing 'available' here could
-    // stomp on an unrelated concurrent state change (e.g. mid-ring for a
-    // different, incoming call).
+    // Only revert the caller if this call actually flipped them to on_call
+    // in the first place (completeOutboundBridge) — a call that never
+    // bridged never touched their status, and forcing 'available' here
+    // could stomp on an unrelated concurrent state change (e.g. mid-ring
+    // for a different, incoming call).
     if (pending.agentId && pending.bridged) await setAgentStatus(pending.agentId, 'available');
-    if (pending.internalTargetAgentId && pending.bridged) await setAgentStatus(pending.internalTargetAgentId, 'available');
+    // The callee of an internal call is different: handleInternalAgentCall
+    // claims them ('available' -> 'ringing') via CAS *before* this pending
+    // object even exists, so — unlike the caller above — they need
+    // reverting on every path, not just a bridged one, or an unanswered/
+    // failed internal call would leave them stuck on 'ringing' forever.
+    // CAS'd against whichever status this specific call actually left them
+    // in (mirrors ringOneAgent's own claim/revert pattern) so a second,
+    // unrelated status change in between isn't clobbered.
+    if (pending.internalTargetAgentId) {
+        await setAgentStatus(pending.internalTargetAgentId, 'available', pending.bridged ? 'on_call' : 'ringing');
+    }
 
     const duration = pending.answeredAt ? Math.round((Date.now() - pending.answeredAt) / 1000) : 0;
     await upsertCallLog({ session_id: sessionId, status, duration });

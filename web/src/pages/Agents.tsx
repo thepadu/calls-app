@@ -226,6 +226,7 @@ export default function Agents() {
                                     options={STATUS_OPTIONS}
                                     title={agent.status === 'ringing' ? 'Calling their phone now…' : undefined}
                                     onChange={status => toggleStatus.mutate({ id: agent.id, status: status as Agent['status'] })}
+                                    disabled={toggleStatus.isPending && toggleStatus.variables?.id === agent.id}
                                 />
                                 {agent.role === 'supervisor' && (
                                     <span className="status-pill" style={{ background: 'var(--brand-dark)', marginLeft: 6 }}>
@@ -239,7 +240,7 @@ export default function Agents() {
                                     <button
                                         className="btn btn-link"
                                         onClick={() => provisionSip.mutate(agent.id)}
-                                        disabled={provisionSip.isPending}
+                                        disabled={provisionSip.isPending && provisionSip.variables === agent.id}
                                         title="Set up a browser softphone for this agent"
                                     >
                                         Add Softphone
@@ -249,7 +250,7 @@ export default function Agents() {
                                     <button
                                         className="btn btn-link"
                                         onClick={() => syncSip.mutate(agent.id)}
-                                        disabled={syncSip.isPending}
+                                        disabled={syncSip.isPending && syncSip.variables === agent.id}
                                         title="Credentials saved but not yet confirmed live on Asterisk — retry the sync"
                                     >
                                         Sync pending — Retry
@@ -309,6 +310,7 @@ export default function Agents() {
                 message={`Remove ${pendingDelete?.name}? They'll no longer be dialed for support calls.`}
                 confirmLabel="Remove"
                 danger
+                confirmDisabled={deleteAgent.isPending}
                 onConfirm={() => pendingDelete && deleteAgent.mutate(pendingDelete.id)}
                 onCancel={() => setPendingDelete(null)}
             />

@@ -194,6 +194,7 @@ export default function LiveQueue() {
                 message={`End ${pendingClear?.caller}'s call? If it's genuinely still live, this actually hangs it up for the agent and caller — not just a database correction. Use this for a call stuck here past a normal wait, or one that needs to be force-ended.`}
                 confirmLabel="End call"
                 danger
+                confirmDisabled={clearCall.isPending}
                 onConfirm={() => pendingClear && clearCall.mutate(pendingClear.session_id)}
                 onCancel={() => setPendingClear(null)}
             />
