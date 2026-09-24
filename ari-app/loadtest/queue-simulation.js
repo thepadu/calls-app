@@ -75,7 +75,15 @@ Module._load = function (request, parent, isMain) {
                 const agent = fakeAgents.find(a => a.id === agentId);
                 return agent ? { sipUsername: agent.sipUsername, status: agent.status } : null;
             },
-            getAgentPhone: async () => null
+            getAgentPhone: async () => null,
+            // Needed for the internal-call-race scenario below —
+            // handleOutboundAgentCall looks the calling agent up by their own
+            // channel's sip_username (for call-log attribution), a path the
+            // ring-all scenarios never exercise.
+            getAgentBySipUsername: async sipUsername => {
+                const agent = fakeAgents.find(a => a.sipUsername === sipUsername);
+                return agent ? { id: agent.id, name: agent.name, phone: null } : null;
+            }
         };
     }
     return originalLoad.apply(this, arguments);
@@ -87,9 +95,12 @@ const {
     tryDequeueNext,
     claimQueuedCall,
     bridgeAgentLeg,
+    handleInternalAgentCall,
+    finishOutboundCall,
     waitingQueue,
     ringGroupBySessionId,
-    agentLegBySessionId
+    agentLegBySessionId,
+    outboundBySessionId
 } = require('../index.js');
 
 // --- Fake ARI primitives -----------------------------------------------
@@ -113,6 +124,13 @@ class FakeChannel extends EventEmitter {
             throw new Error('FakeChannel: simulated no-answer (agent rejected/didn’t pick up)');
         }
     }
+    // No-ops — real ARI channels support these (agent-side ringback audio
+    // during an outbound/internal dial), but nothing here asserts on
+    // whether they were called, only exercised because
+    // handleOutboundAgentCall calls them unconditionally on the caller's
+    // own channel.
+    async ring() {}
+    async ringStop() {}
     async hangup() {
         if (!this._up) return;
         this._up = false;
@@ -226,6 +244,118 @@ async function testClaimRace() {
     return problems;
 }
 
+// --- Internal-call race scenario ------------------------------------------
+// Exercises the CAS added to handleInternalAgentCall's target-agent claim
+// (ari-app/index.js, fixed 2026-09-24): before it existed, dialing a
+// teammate via 9<id> only ever did a plain read of the target's status,
+// never claimed it — a concurrent ring-all fan-out (dequeueNext) targeting
+// the SAME agent for a real waiting customer could originate its own leg
+// before the internal call's own dial ever landed, genuinely bridging one
+// agent into two simultaneous calls. Both paths originate to the identical
+// endpoint string ("PJSIP/targetagent"), so whichever mechanism wins, a
+// double-booking shows up as >1 origination to it — same assertion shape as
+// testClaimRace above, just contesting handleInternalAgentCall's claim
+// instead of claimQueuedCall's.
+async function testInternalCallRace() {
+    const callerAgentId = 90002;
+    const targetAgentId = 90003;
+    const problemsFromInternalCallRevert = [];
+    // The caller is deliberately NOT 'available' — if they were, ring-all's
+    // own fan-out would also try to ring *them*, contesting a second,
+    // unrelated claim this scenario isn't testing. A real internal call can
+    // certainly be placed by an available agent; this just keeps the
+    // scenario's assertion unambiguous, same reasoning as testClaimRace
+    // forcing every uninvolved agent offline.
+    fakeAgents.push({ id: callerAgentId, name: 'CallerAgent', sipUsername: 'calleragent', status: 'on_call' });
+    fakeAgents.push({ id: targetAgentId, name: 'TargetAgent', sipUsername: 'targetagent', status: 'available' });
+
+    const others = fakeAgents.filter(a => a.id !== callerAgentId && a.id !== targetAgentId);
+    const prevStatuses = others.map(a => a.status);
+    others.forEach(a => (a.status = 'offline'));
+
+    // dequeueNext always shifts from the FRONT of the shared waitingQueue —
+    // by the time this scenario runs (after the main round loop below has
+    // reached its fixed point), that queue can easily still hold real
+    // customers the main loop couldn't bridge (more customers than agents).
+    // Unlike testClaimRace above (whose winning path, claimQueuedCall, never
+    // touches waitingQueue at all), a ring-all win here dequeues whatever's
+    // at the front — if that's an unrelated leftover customer rather than
+    // this scenario's own, this test would silently "steal" and strand a
+    // real customer instead of testing anything about the target agent's
+    // claim. Setting the queue aside for the duration guarantees dequeueNext
+    // can only ever contend for the one customer this scenario controls.
+    const displacedWaiting = waitingQueue.splice(0, waitingQueue.length);
+
+    const customer = new FakeChannel('internal-race-customer', '254700090003');
+    await enterQueue(customer, customer.id);
+
+    // A real caller channel already has a PJSIP/<username>-<hexid> name by
+    // the time Stasis hands it to handleInternalAgentCall — set by hand
+    // here since this channel is constructed directly, not via the fake
+    // client's originate().
+    const callerChannel = new FakeChannel('internal-race-caller');
+    callerChannel.name = 'PJSIP/calleragent-00000001';
+
+    const originateCountBefore = originateLog.length;
+    await Promise.all([handleInternalAgentCall(callerChannel, String(targetAgentId)), tryDequeueNext()]);
+    const targetOriginations = originateLog.slice(originateCountBefore).filter(o => o.endpoint === 'PJSIP/targetagent');
+
+    // Whichever side actually won the claim needs its own real cleanup path
+    // run, not a blanket map-clear — a ring-all win leaves a live ringing
+    // leg (agentLegBySessionId + ringGroupBySessionId, same shape
+    // testClaimRace already cleans up); an internal-call win leaves a real
+    // `pending` entry in outboundBySessionId that only finishOutboundCall
+    // itself knows how to unwind correctly (including the CAS revert this
+    // whole scenario exists to verify).
+    const wonByRingAll = targetOriginations.some(o => o.channelId?.startsWith('agent-leg-'));
+    const wonByInternalCall = outboundBySessionId.has(callerChannel.id);
+
+    if (wonByInternalCall) {
+        // The actual regression check: before the fix, this revert never
+        // ran at all for a non-bridged internal call (the old code only
+        // reverted `internalTargetAgentId` when `pending.bridged` was
+        // true), leaving the target permanently stuck on 'ringing'.
+        await finishOutboundCall(callerChannel.id, 'failed');
+        const targetAfter = fakeAgents.find(a => a.id === targetAgentId);
+        if (targetAfter?.status !== 'available') {
+            problemsFromInternalCallRevert.push(
+                `Target agent left in status '${targetAfter?.status}' after a non-bridged internal call ended — expected 'available'`
+            );
+        }
+    }
+    if (wonByRingAll) {
+        for (const sib of ringGroupBySessionId.get(customer.id) || []) {
+            if (sib.agentId === targetAgentId) await sib.channel.hangup().catch(() => {});
+        }
+    }
+
+    // Cleanup — same reasoning as testClaimRace's own block: this scenario
+    // must leave no trace in the shared maps the main round loop's
+    // assertions below rely on.
+    ringGroupBySessionId.delete(customer.id);
+    for (const [channelId, leg] of [...agentLegBySessionId.entries()]) {
+        if (leg.agentId === targetAgentId) agentLegBySessionId.delete(channelId);
+    }
+    const queueIdx = waitingQueue.findIndex(w => w.sessionId === customer.id);
+    if (queueIdx !== -1) waitingQueue.splice(queueIdx, 1);
+    waitingQueue.unshift(...displacedWaiting); // restore, in their original order/position
+    others.forEach((a, i) => (a.status = prevStatuses[i]));
+    fakeAgents.splice(fakeAgents.findIndex(a => a.id === callerAgentId), 1);
+    fakeAgents.splice(fakeAgents.findIndex(a => a.id === targetAgentId), 1);
+
+    const problems = [...problemsFromInternalCallRevert];
+    if (targetOriginations.length > 1) {
+        problems.push(
+            `Internal-call/ring-all race originated ${targetOriginations.length} legs to the same target agent (targetagent) — should be at most 1`
+        );
+    }
+    console.log(
+        `Internal-call race scenario: ${targetOriginations.length} leg(s) originated to the contested target agent ` +
+            `(expected: at most 1; won by ${wonByInternalCall ? 'internal call' : 'ring-all'}).`
+    );
+    return problems;
+}
+
 // --- Simulation ----------------------------------------------------------
 
 async function main() {
@@ -291,9 +421,10 @@ async function main() {
     }
 
     const claimRaceProblems = await testClaimRace();
+    const internalCallRaceProblems = await testInternalCallRace();
 
     // --- Assertions -----------------------------------------------------
-    const problems = [...claimRaceProblems];
+    const problems = [...claimRaceProblems, ...internalCallRaceProblems];
 
     const bridgedCount = callLogWrites.filter(r => r.status === 'ongoing').length;
     console.log(`Bridged: ${bridgedCount} / ${numCustomers} customers`);

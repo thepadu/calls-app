@@ -2216,8 +2216,11 @@ module.exports = {
     ringOneAgent,
     claimQueuedCall,
     bridgeAgentLeg,
+    handleInternalAgentCall,
+    finishOutboundCall,
     waitingQueue,
     ringGroupBySessionId,
     claimedSessions,
-    agentLegBySessionId
+    agentLegBySessionId,
+    outboundBySessionId
 };
