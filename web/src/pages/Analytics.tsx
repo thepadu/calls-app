@@ -208,7 +208,7 @@ export default function Analytics() {
                 {ranked.length === 0 && <p className="empty">No agent call data yet.</p>}
                 {ranked.length > 0 && (
                     <>
-                        <table>
+                        <table className="agent-stats-table">
                             <thead>
                                 <tr>
                                     <th>Rank</th>
@@ -234,6 +234,27 @@ export default function Analytics() {
                                 ))}
                             </tbody>
                         </table>
+
+                        {/* Same reasoning as .calls-mobile-list/.tickets-mobile-list — a
+                            6-column table with no mobile presentation, found live: Missed
+                            and Avg Handle Time fell off a 375px viewport. */}
+                        <div className="agent-stats-mobile-list">
+                            {pageOfStats.map((a, i) => (
+                                <div className="agent-stat-card" key={a.id ?? a.name}>
+                                    <div className="agent-stat-card-top">
+                                        <span className="agent-stat-card-rank">{(statsPage - 1) * PAGE_SIZE + i + 1}</span>
+                                        <span className="agent-stat-card-name">{a.name}</span>
+                                    </div>
+                                    <div className="agent-stat-card-grid">
+                                        <div><span className="hint">Total</span><br />{a.total}</div>
+                                        <div><span className="hint">Answered</span><br />{a.answered}</div>
+                                        <div><span className="hint">Missed</span><br />{a.missed}</div>
+                                        <div><span className="hint">Avg handle</span><br />{a.avgHandleTime}s</div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+
                         <Pagination page={statsPage} totalPages={totalPages} onPageChange={setStatsPage} />
                     </>
                 )}

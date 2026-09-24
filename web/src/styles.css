@@ -1620,6 +1620,94 @@ textarea {
 
 /* ── Tickets page ──────────────────────────────────────────────────── */
 
+/* Same pattern as .calls-mobile-list/.call-card — hidden by default
+   (desktop shows .tickets-table), swapped in under the 880px breakpoint.
+   An 8-column table with no mobile-friendly presentation, found live: the
+   Status/Assigned/Notes/Created columns fell off a 375px viewport with no
+   visual hint there was more to scroll to. */
+.tickets-mobile-list {
+    display: none;
+}
+
+.ticket-card {
+    padding: var(--space-12) 0;
+    border-top: 1px solid var(--border);
+}
+
+.ticket-card:first-child {
+    border-top: none;
+}
+
+.ticket-card-top {
+    display: flex;
+    align-items: center;
+    gap: var(--space-8);
+}
+
+.ticket-card-caller {
+    flex: 1;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ticket-card-badges {
+    display: flex;
+    gap: var(--space-8);
+    margin-top: var(--space-8);
+}
+
+.ticket-card-fields {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-8);
+    margin-top: var(--space-8);
+}
+
+.ticket-card-date {
+    margin-top: var(--space-6);
+}
+
+/* ── Analytics page ───────────────────────────────────────────────── */
+
+.agent-stats-mobile-list {
+    display: none;
+}
+
+.agent-stat-card {
+    padding: var(--space-12) 0;
+    border-top: 1px solid var(--border);
+}
+
+.agent-stat-card:first-child {
+    border-top: none;
+}
+
+.agent-stat-card-top {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-8);
+}
+
+.agent-stat-card-rank {
+    color: var(--muted);
+    font-weight: 700;
+}
+
+.agent-stat-card-name {
+    font-weight: 700;
+}
+
+.agent-stat-card-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: var(--space-8);
+    margin-top: var(--space-8);
+    font-weight: 600;
+}
+
 .recent-call-row {
     display: flex;
     align-items: center;
@@ -2219,6 +2307,22 @@ textarea {
     }
 
     .calls-mobile-list {
+        display: block;
+    }
+
+    .tickets-table {
+        display: none;
+    }
+
+    .tickets-mobile-list {
+        display: block;
+    }
+
+    .agent-stats-table {
+        display: none;
+    }
+
+    .agent-stats-mobile-list {
         display: block;
     }
 

@@ -33,6 +33,64 @@ type Ticket = {
 
 type Agent = { id: number; name: string };
 
+// Mirrors Calls.tsx's CallCard/.calls-mobile-list pattern — same reason:
+// an 8-column table forces heavy horizontal scrolling with no visual hint
+// there's more to see, even with .panel's own overflow-x:auto fallback.
+function TicketCard({
+    ticket,
+    tags,
+    agents,
+    onChangeTag,
+    onChangePriority,
+    onChangeStatus,
+    onChangeAssignee,
+    onOpenNotes
+}: {
+    ticket: Ticket;
+    tags: string[];
+    agents: Agent[];
+    onChangeTag: (tag: string) => void;
+    onChangePriority: (priority: string) => void;
+    onChangeStatus: (status: string) => void;
+    onChangeAssignee: (agentId: number | null) => void;
+    onOpenNotes: () => void;
+}) {
+    return (
+        <div className="ticket-card">
+            <div className="ticket-card-top">
+                <span className="hint">TCK-{ticket.id}</span>
+                <span className="ticket-card-caller">{ticket.caller_number ?? ticket.caller_name ?? '—'}</span>
+                <button
+                    className="btn btn-link"
+                    title={ticket.notes ?? 'Add notes'}
+                    onClick={onOpenNotes}
+                    style={{ color: ticket.notes ? 'var(--brand-text)' : undefined }}
+                >
+                    <FileText size={16} />
+                </button>
+            </div>
+            <div className="ticket-card-badges">
+                <StatusDropdown value={ticket.priority} options={TICKET_PRIORITIES} colors={TICKET_PRIORITY_COLORS} onChange={onChangePriority} />
+                <StatusDropdown value={ticket.status} options={TICKET_STATUSES} colors={TICKET_STATUS_COLORS} onChange={onChangeStatus} />
+            </div>
+            <div className="ticket-card-fields">
+                <select value={ticket.tag ?? ''} onChange={e => onChangeTag(e.target.value)}>
+                    <option value="">No tag</option>
+                    {tags.map(tg => <option key={tg} value={tg}>{tg}</option>)}
+                </select>
+                <select
+                    value={ticket.assigned_agent_id ?? ''}
+                    onChange={e => onChangeAssignee(e.target.value ? Number(e.target.value) : null)}
+                >
+                    <option value="">Unassigned</option>
+                    {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                </select>
+            </div>
+            <div className="hint ticket-card-date">{new Date(ticket.created_at).toLocaleString()}</div>
+        </div>
+    );
+}
+
 const RECENT_CALLS_PAGE_SIZE = 8;
 
 function errorMessage(err: unknown) {
@@ -259,7 +317,7 @@ export default function Tickets() {
                             )}
                         </div>
                     </div>
-                    <table>
+                    <table className="tickets-table">
                         <thead>
                             <tr>
                                 <th>ID</th>
@@ -326,6 +384,24 @@ export default function Tickets() {
                             ))}
                         </tbody>
                     </table>
+
+                    <div className="tickets-mobile-list">
+                        {ticketsStatusMessage && <p className="empty">{ticketsStatusMessage}</p>}
+                        {tickets.map(t => (
+                            <TicketCard
+                                key={t.id}
+                                ticket={t}
+                                tags={tags}
+                                agents={agents}
+                                onChangeTag={tag => updateTicket.mutate({ id: t.id, tag: tag || null })}
+                                onChangePriority={priority => updateTicket.mutate({ id: t.id, priority })}
+                                onChangeStatus={status => updateTicket.mutate({ id: t.id, status })}
+                                onChangeAssignee={assigned_agent_id => updateTicket.mutate({ id: t.id, assigned_agent_id })}
+                                onOpenNotes={() => openNotesEditor(t)}
+                            />
+                        ))}
+                    </div>
+
                     <Pagination page={ticketsPage} totalPages={ticketsTotalPages} onPageChange={setTicketsPage} />
                 </div>
 
