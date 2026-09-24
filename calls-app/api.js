@@ -134,6 +134,23 @@ async function checkAgentLiveOnAsterisk(agentId) {
     }
 }
 
+// Shared by the initial provision route and the regenerate route below —
+// same server-derived-only convention (first name, lowercase, e.g. [simon]),
+// deterministically suffixed with the numeric id on a collision rather than
+// asking anyone to pick. `excludeAgentId` lets regenerate check for a clash
+// against every *other* agent's username without tripping over its own
+// still-in-place old row.
+async function deriveSipUsername(supabase, agentId, agentName, excludeAgentId) {
+    const sanitized = (agentName || '').trim().split(/\s+/)[0].toLowerCase().replace(/[^a-z0-9]/g, '');
+    const baseUsername = /^[a-z]/.test(sanitized) ? sanitized.slice(0, 28) : `agent${agentId}`;
+    let query = supabase.from('agent_sip_credentials').select('agent_id').eq('sip_username', baseUsername);
+    if (excludeAgentId) {
+        query = query.neq('agent_id', excludeAgentId);
+    }
+    const { data: usernameClash } = await query.maybeSingle();
+    return usernameClash ? `${baseUsername}${agentId}`.slice(0, 32) : baseUsername;
+}
+
 // Unlike syncAgentToAsterisk/hangupCallOnAsterisk above, this fails CLOSED:
 // the caller (DELETE /api/agents/:id) must not delete the agent if this
 // returns false. Provisioning failing open just means an agent isn't
@@ -1432,16 +1449,7 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
             return res.status(409).json({ error: 'This agent already has softphone credentials' });
         }
 
-        // Server-derived only, no supervisor input — matches the manual
-        // convention already used in pjsip.conf (first name, lowercase,
-        // e.g. [simon]). A real collision (two agents sharing a first name)
-        // is resolved deterministically by suffixing the numeric id, rather
-        // than by asking the supervisor to pick — this endpoint takes no
-        // free-text fields at all.
-        const sanitized = (agent.name || '').trim().split(/\s+/)[0].toLowerCase().replace(/[^a-z0-9]/g, '');
-        const baseUsername = /^[a-z]/.test(sanitized) ? sanitized.slice(0, 28) : `agent${agentId}`;
-        const { data: usernameClash } = await supabase.from('agent_sip_credentials').select('agent_id').eq('sip_username', baseUsername).maybeSingle();
-        const sipUsername = usernameClash ? `${baseUsername}${agentId}`.slice(0, 32) : baseUsername;
+        const sipUsername = await deriveSipUsername(supabase, agentId, agent.name);
 
         // base64url avoids characters (=, +, /) that are structurally
         // meaningful in pjsip.conf's ini format — defense in depth even
@@ -1493,6 +1501,68 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
 
         const syncResult = await syncAgentToAsterisk(supabase, agentId, creds.sip_username, creds.sip_password);
         res.status(syncResult.ok ? 200 : 202).json({ ok: true, agentId, asteriskSynced: syncResult.ok });
+    });
+
+    // Rotates an agent's SIP credentials in place — the missing piece found
+    // during the 2026-09-24 incident, where agent 1 was stuck on a stale
+    // "test1" username tied to their old name, and fixing it needed direct
+    // DB access (deleting the row by hand) because no route could replace
+    // existing credentials, only create the first set. Re-derives the
+    // username from the agent's *current* name, so a rename-without-
+    // re-provisioning can't silently persist, and issues a fresh password.
+    // Deprovisions the old Asterisk block before writing the new one — never
+    // a moment with two blocks for the same agent — and fails closed if
+    // Asterisk can't be reached (unlike provisioning's fail-open: leaving
+    // stale-but-working credentials live would be a real access-control gap,
+    // not just an onboarding delay).
+    app.post('/api/agents/:id/sip-credentials/regenerate', requireSupervisor, async (req, res) => {
+        const agentId = parseInt(req.params.id, 10);
+        if (!Number.isInteger(agentId)) {
+            return res.status(400).json({ error: 'Invalid agent id' });
+        }
+
+        const { data: agent, error: agentError } = await supabase.from('agents').select('id, name').eq('id', agentId).maybeSingle();
+        if (agentError) {
+            console.error(agentError);
+            return res.status(500).json({ error: 'Failed to load agent' });
+        }
+        if (!agent) {
+            return res.status(404).json({ error: 'Agent not found' });
+        }
+
+        const { data: existing, error: existingError } = await supabase.from('agent_sip_credentials').select('agent_id').eq('agent_id', agentId).maybeSingle();
+        if (existingError) {
+            console.error(existingError);
+            return res.status(500).json({ error: 'Failed to load existing SIP credentials' });
+        }
+        if (!existing) {
+            return res.status(404).json({ error: 'This agent has no softphone credentials to regenerate yet — provision them first' });
+        }
+
+        const deprovisionResult = await deprovisionAgentOnAsterisk(agentId);
+        if (!deprovisionResult.ok) {
+            return res.status(502).json({ error: 'Could not reach Asterisk to revoke the old credentials — nothing was changed, safe to retry' });
+        }
+
+        const sipUsername = await deriveSipUsername(supabase, agentId, agent.name, agentId);
+        const sipPassword = crypto.randomBytes(18).toString('base64url');
+
+        const { error: updateError } = await supabase
+            .from('agent_sip_credentials')
+            .update({
+                sip_username: sipUsername,
+                sip_password: sipPassword,
+                provisioned_by_email: req.user.email,
+                asterisk_synced_at: null
+            })
+            .eq('agent_id', agentId);
+        if (updateError) {
+            console.error(updateError);
+            return res.status(500).json({ error: 'Old credentials were revoked on Asterisk but saving the new ones failed — retry this request' });
+        }
+
+        const syncResult = await syncAgentToAsterisk(supabase, agentId, sipUsername, sipPassword);
+        res.status(syncResult.ok ? 200 : 202).json({ ok: true, agentId, sipUsername, asteriskSynced: syncResult.ok });
     });
 
     // ── IVR menu (supervisors only) ─────────────────────────────────────
