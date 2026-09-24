@@ -10,9 +10,16 @@
 ;     deprovisionAgentBlock), marker-comment-delimited ("; chumz-agent:<id>")
 ;     — provision each real agent again through the dashboard after a
 ;     rebuild rather than hand-copying these back in.
-;   - The legacy test1/test2/test accounts sitting in the live file — ad hoc
-;     manual test credentials, never provisioned through pjsipConfig.js, not
-;     part of the real production setup worth preserving in a template.
+;   - The legacy test1/test2 accounts — removed from the live file entirely
+;     on 2026-09-24 (test1 was actually a stale pjsipConfig.js-managed block
+;     still assigned to a real agent, which is what caused that agent to get
+;     flipped offline mid-call; test2 was an unmarked ad hoc manual account
+;     no agent referenced). Neither was ever worth preserving in a template.
+;
+;   - `test-webrtc` (referenced by every real agent endpoint's `context =`
+;     line in the per-agent blocks above) is NOT a test-only context despite
+;     the name — it's the real, load-bearing production dialplan context in
+;     extensions.conf. Don't remove or rename it during a rebuild.
 
 [transport-wss]
 type = transport

@@ -97,14 +97,25 @@ function withLock(fn) {
 // Shared by both provisioning and deprovisioning: atomic replace (temp file
 // + rename, never fs.appendFileSync — a crash mid-write must never leave
 // pjsip.conf truncated), reload, then a caller-supplied `verify()` against
-// the reload's own output (`pjsip reload` can exit 0 even when the new
-// config has a parse error). On verify failure, rolls back to the exact
-// pre-write snapshot (`beforeContent`, captured by the caller) and reloads
-// again, so a bad write never leaves Asterisk running on a half-applied
-// config. Safe to roll back to a plain snapshot ONLY because writeQueue
-// (below) guarantees no other write can happen in between — see its own
-// comment for why that guarantee matters here specifically.
-async function applyAndVerify(beforeContent, newContent, verify) {
+// `pjsip show endpoint <sipUsername>` — the per-endpoint detail command,
+// not the bulk `pjsip show endpoints` listing this used to check. Found
+// live (2026-09-24): the bulk listing kept showing a stale ghost row for
+// an endpoint that had a live registered contact at the moment of reload,
+// even after its block was genuinely removed from pjsip.conf and Asterisk
+// had otherwise forgotten it — `deprovisionAgentBlock` on a
+// currently-registered agent failed its own verification and rolled back
+// a perfectly good removal, twice in a row, on an agent who happened to be
+// actively connected at the time. The per-endpoint detail command doesn't
+// have this staleness — confirmed directly against the same box, same
+// endpoint, same moment. `pjsip reload` can exit 0 even when the new
+// config has a parse error, which is what this whole check exists to catch.
+// On verify failure, rolls back to the exact pre-write snapshot
+// (`beforeContent`, captured by the caller) and reloads again, so a bad
+// write never leaves Asterisk running on a half-applied config. Safe to
+// roll back to a plain snapshot ONLY because writeQueue (below) guarantees
+// no other write can happen in between — see its own comment for why that
+// guarantee matters here specifically.
+async function applyAndVerify(beforeContent, newContent, sipUsername, verify) {
     const stat = fs.statSync(PJSIP_CONF_PATH);
     const tmpPath = path.join(path.dirname(PJSIP_CONF_PATH), `.pjsip.conf.tmp-${crypto.randomUUID()}`);
 
@@ -123,8 +134,14 @@ async function applyAndVerify(beforeContent, newContent, verify) {
 
     try {
         await execFileP('asterisk', ['-rx', 'pjsip reload']);
-        const { stdout } = await execFileP('asterisk', ['-rx', 'pjsip show endpoints']);
-        verify(stdout);
+        // sipUsername is null only when deprovisioning a block whose auth
+        // line couldn't be parsed (shouldn't happen for anything this
+        // module itself wrote) — nothing to look up per-endpoint, so just
+        // trust the reload succeeded.
+        if (sipUsername) {
+            const { stdout } = await execFileP('asterisk', ['-rx', `pjsip show endpoint ${sipUsername}`]);
+            verify(stdout);
+        }
     } catch (err) {
         atomicWrite(beforeContent);
         await execFileP('asterisk', ['-rx', 'pjsip reload']).catch(() => {});
@@ -157,7 +174,7 @@ async function writeAgentBlock({ agentId, sipUsername, sipPassword }) {
         }
 
         const newContent = content.replace(/\s*$/, '\n') + newBlock;
-        await applyAndVerify(content, newContent, stdout => {
+        await applyAndVerify(content, newContent, sipUsername, stdout => {
             if (!stdout.includes(`Endpoint:  ${sipUsername}`)) {
                 throw new Error(`pjsip reload did not bring up endpoint ${sipUsername}`);
             }
@@ -187,8 +204,8 @@ async function deprovisionAgentBlock(agentId) {
         const sipUsername = removedUsernameMatch ? removedUsernameMatch[1] : null;
 
         const newContent = content.slice(0, range.start) + content.slice(range.end);
-        await applyAndVerify(content, newContent, stdout => {
-            if (sipUsername && stdout.includes(`Endpoint:  ${sipUsername}`)) {
+        await applyAndVerify(content, newContent, sipUsername, stdout => {
+            if (stdout.includes(`Endpoint:  ${sipUsername}`)) {
                 throw new Error(`pjsip reload did not actually remove endpoint ${sipUsername}`);
             }
         });
