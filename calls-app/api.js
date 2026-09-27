@@ -3,6 +3,22 @@ const multer = require('multer');
 const { isValidE164, normalizePhone } = require('./lib/phone');
 const { escapeLikePattern } = require('./lib/text');
 
+// Mirrors ari-app/index.js's own alertGChat exactly — a webhook post must
+// never be allowed to affect a real request (this is only ever fire-and-
+// forget diagnostics), so this only ever logs its own failure, never
+// throws. GCHAT_WEBHOOK_URL unset silently no-ops rather than erroring —
+// alerting is optional infrastructure, not a dependency this process
+// should refuse to run without.
+const GCHAT_WEBHOOK_URL = process.env.GCHAT_WEBHOOK_URL;
+function alertGChat(text) {
+    if (!GCHAT_WEBHOOK_URL) return;
+    fetch(GCHAT_WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text })
+    }).catch(err => console.error('⚠️ Failed to post Google Chat alert:', err.message));
+}
+
 // Memory storage, not disk — the file only ever needs to exist long enough
 // to be forwarded to ari-app as a base64 body (see setHoldMusicOnAsterisk);
 // there's nowhere on this box (DigitalOcean App Platform) it would need to
@@ -2388,6 +2404,76 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         }
 
         res.json({ ok: true });
+    });
+
+    // ── Client diagnostics (Phase 1 of the 2026-09-27 echo investigation) ──
+    // See DECISIONS.md and migrations/030_client_diagnostics.sql. Reports a
+    // softphone-side recovery event (an ICE restart attempt/outcome, a
+    // WebSocket disconnect/reconnect) that previously only ever reached that
+    // agent's own browser console — unrecoverable once the tab closed, which
+    // is exactly what made the reported mid-call echo unprovable after the
+    // fact. This must never affect the softphone itself: the frontend calls
+    // this fire-and-forget (no await in any call-handling path), and this
+    // route never throws past a plain best-effort insert.
+    const CLIENT_DIAGNOSTIC_EVENT_TYPES = [
+        'ice_restart_attempt',
+        'ice_restart_recovered',
+        'ice_restart_failed',
+        'ws_disconnect',
+        'ws_reconnect'
+    ];
+    // Only the failure-shaped events are worth an alert — 'attempt'/
+    // 'recovered'/'ws_reconnect' just mean the existing recovery logic did
+    // its job, which is normal and expected on real-world networks, not a
+    // signal on its own (same reasoning ghost-agent reconciliation in
+    // ari-app already applies to a single stale-tab reconcile).
+    const CONCERNING_EVENT_TYPES = ['ice_restart_failed', 'ws_disconnect'];
+    const DIAGNOSTIC_FLAP_WINDOW_MS = 60 * 60 * 1000;
+    const DIAGNOSTIC_FLAP_THRESHOLD = 3;
+
+    app.post('/api/client-diagnostics', requireAuth, async (req, res) => {
+        const { event_type, call_duration_seconds, detail } = req.body;
+        if (!CLIENT_DIAGNOSTIC_EVENT_TYPES.includes(event_type)) {
+            return res.status(400).json({ error: 'Invalid event_type' });
+        }
+        const callDurationSeconds =
+            Number.isInteger(call_duration_seconds) && call_duration_seconds >= 0 ? call_duration_seconds : null;
+
+        const { error } = await supabase.from('client_diagnostics').insert({
+            agent_id: req.user.agentId ?? null,
+            event_type,
+            call_duration_seconds: callDurationSeconds,
+            detail: typeof detail === 'string' ? detail.slice(0, 500) : null
+        });
+
+        if (error) {
+            // Logged, not surfaced — a broken diagnostics pipe must never
+            // look like a broken softphone to the agent using it.
+            console.error('❌ Failed to record client diagnostic event:', error);
+            return res.status(204).end();
+        }
+
+        // Best-effort, in-line sliding-window alert — a DB count query
+        // (not an in-memory Map, unlike ari-app's equivalent ghost-flap
+        // counter) because this process can run as more than one
+        // DigitalOcean App Platform instance; an in-memory count would
+        // silently undercount whenever two of an agent's events land on
+        // different instances.
+        if (req.user.agentId && CONCERNING_EVENT_TYPES.includes(event_type)) {
+            const { count } = await supabase
+                .from('client_diagnostics')
+                .select('id', { count: 'exact', head: true })
+                .eq('agent_id', req.user.agentId)
+                .in('event_type', CONCERNING_EVENT_TYPES)
+                .gte('created_at', new Date(Date.now() - DIAGNOSTIC_FLAP_WINDOW_MS).toISOString());
+            if (count !== null && count >= DIAGNOSTIC_FLAP_THRESHOLD) {
+                alertGChat(
+                    `⚠️ Agent ${req.user.agentId}'s softphone has reported ${count} connection problem(s) in the last hour — likely an unstable connection.`
+                );
+            }
+        }
+
+        res.status(204).end();
     });
 
 };

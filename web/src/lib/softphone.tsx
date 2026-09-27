@@ -151,6 +151,20 @@ function watchLocalTrackHealth(session: Session) {
 // deterministic response instead of waiting on that.
 const ICE_DISCONNECTED_DEBOUNCE_MS = 3000;
 
+// Phase 1 of the 2026-09-27 mid-call echo investigation (see DECISIONS.md):
+// every event this file already detects and console.warns about — an ICE
+// restart, a transport disconnect — previously only ever reached that
+// agent's own browser console, unrecoverable once the tab closed. That's
+// exactly what made a reported echo unprovable after the fact. Fire-and-
+// forget by design: a broken diagnostics pipe (server down, no network)
+// must never surface to the agent or affect the call itself.
+function reportClientDiagnostic(eventType: string, callDurationSeconds?: number, detail?: string) {
+    apiFetch('/api/client-diagnostics', {
+        method: 'POST',
+        body: JSON.stringify({ event_type: eventType, call_duration_seconds: callDurationSeconds, detail })
+    }).catch(() => {});
+}
+
 function watchIceConnection(session: Session, onRestartFailed: () => void) {
     const pc = (session.sessionDescriptionHandler as unknown as { peerConnection: RTCPeerConnection })
         ?.peerConnection;
@@ -162,10 +176,15 @@ function watchIceConnection(session: Session, onRestartFailed: () => void) {
     function attemptRestart(reason: string) {
         if (restarting || session.state !== SessionState.Established) return;
         restarting = true;
+        const callDurationSeconds = Math.round((Date.now() - startedAt) / 1000);
         // Logged with call duration so far — if an echo report recurs, this
         // lets its timing be correlated against real restart events instead
-        // of guessing whether the two are actually related.
-        console.warn(`[softphone] ICE ${reason} mid-call (${Math.round((Date.now() - startedAt) / 1000)}s in) — attempting ICE restart`);
+        // of guessing whether the two are actually related. Now also
+        // reported server-side (reportClientDiagnostic) for the same
+        // reason — the console.warn alone is unrecoverable once the tab
+        // closes, which is exactly what made a prior echo report unprovable.
+        console.warn(`[softphone] ICE ${reason} mid-call (${callDurationSeconds}s in) — attempting ICE restart`);
+        reportClientDiagnostic('ice_restart_attempt', callDurationSeconds, reason);
         // offerOptions is a web-platform-specific SessionDescriptionHandlerOptions
         // field that Session.invite()'s core type (shared across non-browser
         // platforms) doesn't declare, even though it's exactly what the web
@@ -176,8 +195,17 @@ function watchIceConnection(session: Session, onRestartFailed: () => void) {
         } as unknown as Parameters<typeof session.invite>[0];
         session
             .invite(restartOptions)
+            .then(() => {
+                // "Recovered" means the re-INVITE/SDP exchange itself
+                // succeeded, not that audio is provably clean again (no web
+                // API can confirm that) — still the right proxy for "the
+                // recovery path didn't fail outright," which is what
+                // matters for correlating against a future echo report.
+                reportClientDiagnostic('ice_restart_recovered', callDurationSeconds, reason);
+            })
             .catch(err => {
                 console.error('[softphone] ICE restart failed — call may drop:', err);
+                reportClientDiagnostic('ice_restart_failed', callDurationSeconds, `${reason}: ${err?.message ?? 'unknown error'}`);
                 onRestartFailed();
             })
             .finally(() => {
@@ -236,6 +264,10 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
     // reconnectNonce while a call is in progress; the effect below fires
     // the deferred reconnect once the call actually ends.
     const pendingReconnectRef = useRef(false);
+    // Set in onDisconnect, cleared once the following registration actually
+    // succeeds — lets that success be reported as a real 'ws_reconnect'
+    // (Phase 1 diagnostics) rather than every ordinary first-time login.
+    const hadDisconnectedRef = useRef(false);
 
     // Single source of truth for "is this agent mid-call right now" — kept
     // in sync here since incomingCall/outgoingCall/activeCall all live in
@@ -448,6 +480,19 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
                     onDisconnect: err => {
                         console.warn('[softphone] transport disconnected:', err?.message);
                         setRegistrationState('unregistered');
+                        hadDisconnectedRef.current = true;
+                        // Confirmed by this exact investigation (see
+                        // DECISIONS.md) that this transport can drop mid-call
+                        // (Asterisk closing an idle WebSocket) without the
+                        // deferred-reconnect logic below ever touching the
+                        // call itself — callDurationSeconds here is still
+                        // worth recording so a future echo report can rule
+                        // this in or out, not because it's known to cause one.
+                        reportClientDiagnostic(
+                            'ws_disconnect',
+                            activeCallRef.current ? Math.round((Date.now() - activeCallRef.current.startedAt) / 1000) : undefined,
+                            err?.message
+                        );
 
                         // Bumping reconnectNonce tears the whole effect down
                         // and rebuilds it (fresh UserAgent) via the cleanup
@@ -514,6 +559,10 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
                     if (state === RegistererState.Registered) {
                         setRegistrationState('registered');
                         reconnectDelayMsRef.current = 1000;
+                        if (hadDisconnectedRef.current) {
+                            hadDisconnectedRef.current = false;
+                            reportClientDiagnostic('ws_reconnect');
+                        }
                     } else if (state === RegistererState.Unregistered) {
                         setRegistrationState('unregistered');
                     }
