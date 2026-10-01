@@ -2202,15 +2202,23 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         }
 
         if (top_n_group_size !== undefined) {
-            if (!Number.isInteger(top_n_group_size) || top_n_group_size < 1) {
-                return res.status(400).json({ error: 'Group size must be a positive integer' });
+            if (!Number.isInteger(top_n_group_size) || top_n_group_size < 1 || top_n_group_size > 50) {
+                return res.status(400).json({ error: 'Group size must be between 1 and 50' });
             }
             fieldUpdates.top_n_group_size = top_n_group_size;
         }
 
         if (broadcast_fallback_seconds !== undefined) {
-            if (!Number.isInteger(broadcast_fallback_seconds) || broadcast_fallback_seconds < 1) {
-                return res.status(400).json({ error: 'Fallback delay must be a positive integer' });
+            // Upper-bounded well below ari-app's own MAX_QUEUE_WAIT_MS
+            // (5 minutes, index.js) — without this, a value set anywhere
+            // near that overall abandon timeout would mean a waiting
+            // customer gets forwarded/apologized-to and removed from the
+            // queue before idle_first_broadcast's own fallback ever had a
+            // chance to broaden the ring, silently defeating the whole
+            // point of picking that strategy. 120s leaves a comfortable
+            // margin for the broadened ring itself to still ring out.
+            if (!Number.isInteger(broadcast_fallback_seconds) || broadcast_fallback_seconds < 1 || broadcast_fallback_seconds > 120) {
+                return res.status(400).json({ error: 'Fallback delay must be between 1 and 120 seconds' });
             }
             fieldUpdates.broadcast_fallback_seconds = broadcast_fallback_seconds;
         }
