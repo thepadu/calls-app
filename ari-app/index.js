@@ -43,6 +43,7 @@ const {
     getIvrOptions,
     upsertCallLog,
     getAvailableAgentsWithSip,
+    getRoutingConfig,
     setAgentStatus,
     getAgentPhone,
     getAgentBySipUsername,
@@ -918,19 +919,59 @@ async function ringOneAgent(agent, waiting, ringGroup, customerNumber) {
     }
 }
 
-// Rings every currently-available agent's browser at once — first to
-// answer wins (see bridgeAgentLeg's claim check), the rest get hung up and
-// put back to 'available' the moment someone else wins.
+// Picks which of the longest-idle-first `sortedAgents` to ring THIS tick,
+// per the supervisor-configured strategy (routing_config, see
+// PATCH /api/routing-config) — see DECISIONS.md's 2026-10-01 entry for the
+// full design. Deliberately a pure function with no new state of its own:
+// every strategy reduces to "how many of the front of this already-sorted
+// list," reusing two things that already exist for other reasons —
+// `sortedAgents`' idle ordering (getAvailableAgentsWithSip) and each
+// waiting customer's own `joinedAt` (already the canonical queue-wait
+// clock, preserved across requeues) — rather than inventing per-customer
+// "which agents have I already tried" bookkeeping. That's what makes
+// idle_sequential/idle_first_broadcast self-advance for free: an agent
+// whose ring just timed out unanswered gets their `available_since`
+// re-stamped to now (setAgentStatus's revert-to-'available' write), which
+// bumps them to the *back* of this same ordering on the very next tick —
+// so "ring the front of the list" already means "ring whoever hasn't just
+// failed to answer," with nothing here needing to know that happened.
+function selectRingCandidates(sortedAgents, waiting, routingConfig) {
+    switch (routingConfig.strategy) {
+        case 'idle_sequential':
+            return sortedAgents.slice(0, 1);
+        case 'idle_top_n':
+            return sortedAgents.slice(0, routingConfig.top_n_group_size);
+        case 'idle_first_broadcast': {
+            const waitedMs = Date.now() - waiting.joinedAt;
+            if (waitedMs >= routingConfig.broadcast_fallback_seconds * 1000) return sortedAgents;
+            return sortedAgents.slice(0, 1);
+        }
+        case 'ring_all':
+        default:
+            return sortedAgents;
+    }
+}
+
+// Rings a strategy-selected subset of currently-available agents' browsers
+// at once — first to answer wins (see bridgeAgentLeg's claim check), the
+// rest get hung up and put back to 'available' the moment someone else
+// wins. With the default 'ring_all' strategy that subset is everyone.
 async function dequeueNext() {
-    const agents = await getAvailableAgentsWithSip();
-    if (agents.length === 0) return;
+    const sortedAgents = await getAvailableAgentsWithSip();
+    if (sortedAgents.length === 0) return;
     // getAvailableAgentsWithSip is a real network round trip — the sole
     // waiting customer can hang up (and get spliced out by the global
     // StasisEnd handler) while it's in flight, leaving nothing left to shift.
     if (waitingQueue.length === 0) return;
 
     const waiting = waitingQueue.shift();
-    console.log(`📲 Ringing ${agents.length} available agent(s) for ${waiting.sessionId}`);
+    const routingConfig = await getRoutingConfig();
+    const agents = selectRingCandidates(sortedAgents, waiting, routingConfig);
+    if (agents.length === 0) {
+        waitingQueue.unshift(waiting); // shouldn't happen (sortedAgents was non-empty), but never silently drop a customer
+        return;
+    }
+    console.log(`📲 Ringing ${agents.length}/${sortedAgents.length} available agent(s) for ${waiting.sessionId} (strategy: ${routingConfig.strategy})`);
 
     // The agent's browser should see who's actually calling, not a generic
     // label — pulled straight off the customer's own channel object, still
@@ -2218,6 +2259,7 @@ module.exports = {
     bridgeAgentLeg,
     handleInternalAgentCall,
     finishOutboundCall,
+    selectRingCandidates,
     waitingQueue,
     ringGroupBySessionId,
     claimedSessions,

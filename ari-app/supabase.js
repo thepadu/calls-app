@@ -117,16 +117,37 @@ async function upsertCallLog(row) {
     if (error) console.error('❌ Failed to upsert call_logs:', error.message);
 }
 
+// Ordered longest-idle-first (oldest available_since first, nulls last) —
+// dequeueNext's selectRingCandidates relies on this ordering for every
+// strategy except 'ring_all', which ignores order entirely (it rings
+// everyone returned here regardless). See DECISIONS.md's 2026-10-01 entry.
 async function getAvailableAgentsWithSip() {
     const { data, error } = await supabase
         .from('agents')
-        .select('id, name, phone, agent_sip_credentials(sip_username)')
-        .eq('status', 'available');
+        .select('id, name, phone, available_since, agent_sip_credentials(sip_username)')
+        .eq('status', 'available')
+        .order('available_since', { ascending: true, nullsFirst: false });
     if (error) {
         console.error('❌ Failed to load available agents:', error.message);
         return [];
     }
     return data.filter(a => a.agent_sip_credentials?.sip_username);
+}
+
+async function getRoutingConfig() {
+    const { data, error } = await supabase
+        .from('routing_config')
+        .select('strategy, top_n_group_size, broadcast_fallback_seconds')
+        .eq('id', 1)
+        .maybeSingle();
+    if (error || !data) {
+        if (error) console.error('❌ Failed to load routing config, defaulting to ring_all:', error.message);
+        // ring_all is the historical, only-ever-shipped behavior — the
+        // correct fallback if the row is ever missing/unreadable, not a
+        // narrower strategy that could leave a real caller under-rung.
+        return { strategy: 'ring_all', top_n_group_size: 2, broadcast_fallback_seconds: 8 };
+    }
+    return data;
 }
 
 // `expectedStatus`, when given, turns this into a compare-and-swap: the
@@ -141,7 +162,17 @@ async function getAvailableAgentsWithSip() {
 // from under this one, and the caller must not treat the agent as
 // claimed/reverted by its own call.
 async function setAgentStatus(agentId, status, expectedStatus = null) {
-    let query = supabase.from('agents').update({ status }).eq('id', agentId);
+    // Stamped on every transition TO 'available', from every call site
+    // (login, a ring timing out unanswered, a call ending, a supervisor
+    // override, break ending) — this is the one shared write path all of
+    // them already go through, so it's the one place that needs to know
+    // about idle-time tracking at all. Deliberately NOT cleared when status
+    // moves away from 'available' — only the next transition *back* to
+    // 'available' ever overwrites it, which is exactly the "how long has
+    // this agent been idle" clock getAvailableAgentsWithSip's ordering (and
+    // every non-ring_all routing strategy) depends on.
+    const updates = status === 'available' ? { status, available_since: new Date().toISOString() } : { status };
+    let query = supabase.from('agents').update(updates).eq('id', agentId);
     if (expectedStatus) query = query.eq('status', expectedStatus);
     const { data, error } = await query.select('id');
     if (error) {
@@ -579,6 +610,7 @@ module.exports = {
     getIvrOptions,
     upsertCallLog,
     getAvailableAgentsWithSip,
+    getRoutingConfig,
     setAgentStatus,
     getAgentPhone,
     getAgentBySipUsername,

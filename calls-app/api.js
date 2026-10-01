@@ -385,15 +385,23 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
     // 010_agent_last_seen.sql not yet applied) — status changes must keep
     // working regardless of migration timing.
     async function updateAgentStatus(agentId, fields) {
+        // Mirrors ari-app/supabase.js's own setAgentStatus exactly — this is
+        // the one shared write path every dashboard-driven status change
+        // goes through (self-service "go available", a supervisor's roster
+        // override), so it's the one place that needs to know about
+        // idle-time tracking at all. See that file's own comment for why
+        // this is never cleared on the way OUT of 'available', only
+        // re-stamped on the way back in.
+        const statusFields = fields.status === 'available' ? { ...fields, available_since: new Date().toISOString() } : fields;
         const result = await supabase
             .from('agents')
-            .update({ ...fields, last_seen_at: new Date().toISOString() })
+            .update({ ...statusFields, last_seen_at: new Date().toISOString() })
             .eq('id', agentId)
             .select()
             .single();
 
         if (result.error?.message?.includes('last_seen_at')) {
-            return supabase.from('agents').update(fields).eq('id', agentId).select().single();
+            return supabase.from('agents').update(statusFields).eq('id', agentId).select().single();
         }
 
         return result;
@@ -2162,6 +2170,62 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         }
 
         res.json({ hours: data });
+    });
+
+    // ── Call routing (supervisors only) ──────────────────────────────────
+    // Which available agent(s) ari-app rings for a new waiting customer —
+    // see ari-app/index.js's selectRingCandidates and DECISIONS.md's
+    // 2026-10-01 entry for the full design. Read fresh by ari-app on every
+    // queue poll tick (no cache/restart needed for a change here to apply).
+
+    const ROUTING_STRATEGIES = ['ring_all', 'idle_top_n', 'idle_first_broadcast', 'idle_sequential'];
+
+    app.get('/api/routing-config', requireSupervisor, async (req, res) => {
+        const { data, error } = await supabase.from('routing_config').select('*').eq('id', 1).maybeSingle();
+
+        if (error) {
+            console.error(error);
+            return res.status(500).json({ error: 'Failed to load routing config' });
+        }
+
+        res.json({ config: data });
+    });
+
+    app.patch('/api/routing-config', requireSupervisor, async (req, res) => {
+        const { strategy, top_n_group_size, broadcast_fallback_seconds } = req.body;
+
+        const fieldUpdates = {};
+
+        if (strategy !== undefined) {
+            if (!ROUTING_STRATEGIES.includes(strategy)) return res.status(400).json({ error: 'Invalid strategy' });
+            fieldUpdates.strategy = strategy;
+        }
+
+        if (top_n_group_size !== undefined) {
+            if (!Number.isInteger(top_n_group_size) || top_n_group_size < 1) {
+                return res.status(400).json({ error: 'Group size must be a positive integer' });
+            }
+            fieldUpdates.top_n_group_size = top_n_group_size;
+        }
+
+        if (broadcast_fallback_seconds !== undefined) {
+            if (!Number.isInteger(broadcast_fallback_seconds) || broadcast_fallback_seconds < 1) {
+                return res.status(400).json({ error: 'Fallback delay must be a positive integer' });
+            }
+            fieldUpdates.broadcast_fallback_seconds = broadcast_fallback_seconds;
+        }
+
+        fieldUpdates.updated_at = new Date().toISOString();
+        fieldUpdates.updated_by = req.user.email;
+
+        const { data, error } = await supabase.from('routing_config').update(fieldUpdates).eq('id', 1).select().single();
+
+        if (error) {
+            console.error(error);
+            return res.status(500).json({ error: 'Failed to update routing config' });
+        }
+
+        res.json({ config: data });
     });
 
     // ── Finance wallet ───────────────────────────────────────────────────

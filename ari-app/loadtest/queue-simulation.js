@@ -41,14 +41,33 @@ const fakeAgents = [];
 const agentStatusLog = []; // { agentId, status, expectedStatus, applied } — asserted against at the end
 const callLogWrites = [];
 const originateLog = []; // { channelId, endpoint } — every fake originate() call, for the claim-race scenario
+// Mutable so each scenario below can test a different strategy without a
+// separate process — real production reads this from one DB row too, so
+// "changeable at runtime" is a faithful property to simulate, not a
+// shortcut. 'ring_all' matches the only behavior this harness exercised
+// before 2026-10-01, so every pre-existing scenario stays meaningful
+// unchanged unless it explicitly opts into a different strategy.
+const fakeRoutingConfig = { strategy: 'ring_all', top_n_group_size: 2, broadcast_fallback_seconds: 8 };
 
 Module._load = function (request, parent, isMain) {
     if (parent && path.resolve(path.dirname(parent.filename), request) === supabasePath.replace(/\.js$/, '')) {
         return {
+            // Ordered oldest-availableSince-first, mirroring the real
+            // query's `.order('available_since', { ascending: true })` —
+            // every non-ring_all scenario below depends on this order being
+            // real, not incidental array-insertion order.
             getAvailableAgentsWithSip: async () =>
                 fakeAgents
                     .filter(a => a.status === 'available')
-                    .map(a => ({ id: a.id, name: a.name, agent_sip_credentials: { sip_username: a.sipUsername } })),
+                    .slice()
+                    .sort((a, b) => (a.availableSince ?? 0) - (b.availableSince ?? 0))
+                    .map(a => ({
+                        id: a.id,
+                        name: a.name,
+                        available_since: a.availableSince ?? null,
+                        agent_sip_credentials: { sip_username: a.sipUsername }
+                    })),
+            getRoutingConfig: async () => fakeRoutingConfig,
             // Compare-and-swap, mirroring the real setAgentStatus in
             // ari-app/supabase.js: with expectedStatus given, the write
             // only applies if the agent's current status still matches —
@@ -58,12 +77,18 @@ Module._load = function (request, parent, isMain) {
             // stopSiblingRings/bridgeAgentLeg would silently behave like
             // the old unconditional write in every simulated run, and a
             // lost claim race would never actually show up as a skipped
-            // ring here.
+            // ring here. Also mirrors the real function's available_since
+            // stamp-on-transition-to-available — what lets
+            // idle_sequential/idle_first_broadcast self-advance in the
+            // real system is exactly as true of this fake.
             setAgentStatus: async (agentId, status, expectedStatus = null) => {
                 const agent = fakeAgents.find(a => a.id === agentId);
                 if (!agent) return false;
                 const applied = !expectedStatus || agent.status === expectedStatus;
-                if (applied) agent.status = status;
+                if (applied) {
+                    agent.status = status;
+                    if (status === 'available') agent.availableSince = Date.now();
+                }
                 agentStatusLog.push({ agentId, status, expectedStatus, applied });
                 return applied;
             },
@@ -356,6 +381,137 @@ async function testInternalCallRace() {
     return problems;
 }
 
+// --- Routing-strategy scenario ---------------------------------------------
+// Exercises selectRingCandidates (ari-app/index.js) directly through
+// dequeueNext for each of the three non-default strategies added
+// 2026-10-01 — ring_all itself is already exercised by every other
+// scenario in this file (it's the default fakeRoutingConfig), so this
+// doesn't re-test it. Same queue-isolation discipline as
+// testInternalCallRace above: waitingQueue is set aside for the scenario's
+// duration so dequeueNext can only ever contend for the customers this
+// scenario controls, and every fake agent/customer it adds is removed
+// again before returning, regardless of outcome.
+async function testRoutingStrategies() {
+    const baseId = 90100;
+    const agentIds = [baseId, baseId + 1, baseId + 2, baseId + 3];
+    const now = Date.now();
+    // Staggered idle times, oldest (most idle) first — agentIds[0] should
+    // always be picked first by every non-ring_all strategy.
+    agentIds.forEach((id, i) => {
+        fakeAgents.push({ id, name: `RoutingAgent${i}`, sipUsername: `routingagent${i}`, status: 'available', availableSince: now - (4 - i) * 10_000 });
+    });
+
+    const others = fakeAgents.filter(a => !agentIds.includes(a.id));
+    const prevStatuses = others.map(a => a.status);
+    others.forEach(a => (a.status = 'offline'));
+
+    const displacedWaiting = waitingQueue.splice(0, waitingQueue.length);
+    const prevRoutingConfig = { ...fakeRoutingConfig };
+    const problems = [];
+
+    function originatedEndpoints(sinceIndex) {
+        return originateLog.slice(sinceIndex).map(o => o.endpoint);
+    }
+
+    async function cleanupCustomer(sessionId) {
+        for (const sib of ringGroupBySessionId.get(sessionId) || []) {
+            await sib.channel.hangup().catch(() => {});
+        }
+        ringGroupBySessionId.delete(sessionId);
+        const idx = waitingQueue.findIndex(w => w.sessionId === sessionId);
+        if (idx !== -1) waitingQueue.splice(idx, 1);
+        for (const [channelId, leg] of [...agentLegBySessionId.entries()]) {
+            if (agentIds.includes(leg.agentId)) agentLegBySessionId.delete(channelId);
+        }
+        agentIds.forEach(id => {
+            const a = fakeAgents.find(ag => ag.id === id);
+            if (a) a.status = 'available'; // reset between sub-scenarios regardless of what ringing left them at
+        });
+    }
+
+    try {
+        // idle_sequential: exactly the single most-idle agent, never more.
+        fakeRoutingConfig.strategy = 'idle_sequential';
+        fakeRoutingConfig.top_n_group_size = prevRoutingConfig.top_n_group_size;
+        fakeRoutingConfig.broadcast_fallback_seconds = prevRoutingConfig.broadcast_fallback_seconds;
+        let customer = new FakeChannel('routing-seq-customer');
+        await enterQueue(customer, customer.id);
+        let before = originateLog.length;
+        await tryDequeueNext();
+        let rung = originatedEndpoints(before);
+        if (rung.length !== 1 || rung[0] !== 'PJSIP/routingagent0') {
+            problems.push(`idle_sequential rang ${JSON.stringify(rung)} — expected exactly ['PJSIP/routingagent0']`);
+        }
+        await cleanupCustomer(customer.id);
+
+        // idle_top_n (group_size=2): exactly the two most-idle agents.
+        fakeRoutingConfig.strategy = 'idle_top_n';
+        fakeRoutingConfig.top_n_group_size = 2;
+        customer = new FakeChannel('routing-topn-customer');
+        await enterQueue(customer, customer.id);
+        before = originateLog.length;
+        await tryDequeueNext();
+        rung = originatedEndpoints(before).sort();
+        const expectedTopN = ['PJSIP/routingagent0', 'PJSIP/routingagent1'].sort();
+        if (JSON.stringify(rung) !== JSON.stringify(expectedTopN)) {
+            problems.push(`idle_top_n(2) rang ${JSON.stringify(rung)} — expected ${JSON.stringify(expectedTopN)}`);
+        }
+        await cleanupCustomer(customer.id);
+
+        // idle_first_broadcast, under the fallback threshold: same as
+        // idle_sequential — only the single most-idle agent.
+        fakeRoutingConfig.strategy = 'idle_first_broadcast';
+        fakeRoutingConfig.broadcast_fallback_seconds = 8;
+        customer = new FakeChannel('routing-broadcast-early-customer');
+        await enterQueue(customer, customer.id);
+        before = originateLog.length;
+        await tryDequeueNext();
+        rung = originatedEndpoints(before);
+        if (rung.length !== 1 || rung[0] !== 'PJSIP/routingagent0') {
+            problems.push(`idle_first_broadcast (under threshold) rang ${JSON.stringify(rung)} — expected exactly ['PJSIP/routingagent0']`);
+        }
+        await cleanupCustomer(customer.id);
+
+        // idle_first_broadcast, past the fallback threshold: broadens to
+        // every available agent. joinedAt is set by enterQueue itself (not
+        // caller-settable) — backdated afterward by directly mutating the
+        // waitingQueue entry, the same technique testClaimRace/
+        // testInternalCallRace already use for other fields on this object.
+        customer = new FakeChannel('routing-broadcast-late-customer');
+        await enterQueue(customer, customer.id);
+        const entry = waitingQueue.find(w => w.sessionId === customer.id);
+        entry.joinedAt = Date.now() - (fakeRoutingConfig.broadcast_fallback_seconds * 1000 + 1000);
+        before = originateLog.length;
+        await tryDequeueNext();
+        rung = originatedEndpoints(before).sort();
+        const expectedAll = agentIds.map((_, i) => `PJSIP/routingagent${i}`).sort();
+        if (JSON.stringify(rung) !== JSON.stringify(expectedAll)) {
+            problems.push(`idle_first_broadcast (past threshold) rang ${JSON.stringify(rung)} — expected all of ${JSON.stringify(expectedAll)}`);
+        }
+        await cleanupCustomer(customer.id);
+    } finally {
+        // Restore exactly as found, regardless of pass/fail above — this
+        // scenario runs after the main round loop's own assertions have
+        // already been computed in some call orders (none today, but
+        // nothing should depend on that), and definitely before them in
+        // the order main() actually uses below.
+        fakeRoutingConfig.strategy = prevRoutingConfig.strategy;
+        fakeRoutingConfig.top_n_group_size = prevRoutingConfig.top_n_group_size;
+        fakeRoutingConfig.broadcast_fallback_seconds = prevRoutingConfig.broadcast_fallback_seconds;
+        others.forEach((a, i) => (a.status = prevStatuses[i]));
+        agentIds.forEach(id => {
+            const idx = fakeAgents.findIndex(a => a.id === id);
+            if (idx !== -1) fakeAgents.splice(idx, 1);
+        });
+        waitingQueue.unshift(...displacedWaiting);
+    }
+
+    console.log(
+        `Routing-strategy scenario: ${problems.length === 0 ? 'all 3 non-default strategies selected the expected candidates' : problems.length + ' mismatch(es)'}.`
+    );
+    return problems;
+}
+
 // --- Simulation ----------------------------------------------------------
 
 async function main() {
@@ -422,9 +578,10 @@ async function main() {
 
     const claimRaceProblems = await testClaimRace();
     const internalCallRaceProblems = await testInternalCallRace();
+    const routingStrategyProblems = await testRoutingStrategies();
 
     // --- Assertions -----------------------------------------------------
-    const problems = [...claimRaceProblems, ...internalCallRaceProblems];
+    const problems = [...claimRaceProblems, ...internalCallRaceProblems, ...routingStrategyProblems];
 
     const bridgedCount = callLogWrites.filter(r => r.status === 'ongoing').length;
     console.log(`Bridged: ${bridgedCount} / ${numCustomers} customers`);

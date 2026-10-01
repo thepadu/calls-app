@@ -234,6 +234,161 @@ function CallRatingPanel() {
     );
 }
 
+type RoutingConfig = {
+    strategy: 'ring_all' | 'idle_top_n' | 'idle_first_broadcast' | 'idle_sequential';
+    top_n_group_size: number;
+    broadcast_fallback_seconds: number;
+    updated_at?: string | null;
+    updated_by?: string | null;
+};
+
+const ROUTING_STRATEGIES: { value: RoutingConfig['strategy']; label: string; description: string }[] = [
+    {
+        value: 'ring_all',
+        label: 'Ring everyone at once',
+        description:
+            "Every available agent's phone rings simultaneously — first to answer gets the call. Fastest pickup, but the same quick-to-click agents tend to get the most calls."
+    },
+    {
+        value: 'idle_top_n',
+        label: 'Ring the longest-idle few at once',
+        description: 'Rings the agents who have been available the longest, simultaneously — a middle ground between speed and fairness.'
+    },
+    {
+        value: 'idle_first_broadcast',
+        label: 'Ring the longest-idle agent first, then everyone',
+        description:
+            "Rings only the fairest-turn agent first. If they don't answer within the delay below, broadens to everyone — fair under normal conditions, no slower pickup when someone's away."
+    },
+    {
+        value: 'idle_sequential',
+        label: 'Ring one at a time, longest-idle first',
+        description:
+            'Strictly one agent at a time, in idle order. Most fair, but a caller could wait through an unanswered ring before the next agent is tried.'
+    }
+];
+
+function RoutingConfigPanel() {
+    const queryClient = useQueryClient();
+    const showToast = useToast();
+
+    const { data, isLoading, isError } = useQuery({ queryKey: ['routing-config'], queryFn: () => apiFetch('/api/routing-config') });
+    const config: RoutingConfig | null = data?.config ?? null;
+
+    const [form, setForm] = useState<RoutingConfig | null>(null);
+
+    useEffect(() => {
+        if (config) setForm(config);
+    }, [config]);
+
+    const save = useMutation({
+        mutationFn: (changes: Partial<RoutingConfig>) =>
+            apiFetch('/api/routing-config', { method: 'PATCH', body: JSON.stringify(changes) }),
+        onSuccess: () => {
+            showToast('Call routing settings saved');
+            queryClient.invalidateQueries({ queryKey: ['routing-config'] });
+        },
+        onError: (err: unknown) => showToast(errorMessage(err), 'error')
+    });
+
+    // Same "always render the shell, only the form body waits on real data"
+    // reasoning as BusinessHoursPanel above — avoids a visible page shift
+    // while this query is in flight alongside its already-loaded siblings.
+    if (!form) {
+        return (
+            <div className="panel">
+                <div className="panel-header">
+                    <h3>Call routing</h3>
+                </div>
+                <p className="empty">{isError ? "Couldn't load call routing settings." : isLoading ? 'Loading…' : null}</p>
+            </div>
+        );
+    }
+
+    const dirty =
+        !config ||
+        form.strategy !== config.strategy ||
+        form.top_n_group_size !== config.top_n_group_size ||
+        form.broadcast_fallback_seconds !== config.broadcast_fallback_seconds;
+
+    // Only the field the selected strategy actually reads needs to be
+    // valid — the other one can be stale/untouched without blocking Save.
+    const groupSizeValid = form.strategy !== 'idle_top_n' || (Number.isInteger(form.top_n_group_size) && form.top_n_group_size >= 1);
+    const fallbackValid =
+        form.strategy !== 'idle_first_broadcast' || (Number.isInteger(form.broadcast_fallback_seconds) && form.broadcast_fallback_seconds >= 1);
+
+    const selected = ROUTING_STRATEGIES.find(s => s.value === form.strategy);
+
+    return (
+        <div className="panel">
+            <div className="panel-header">
+                <h3>Call routing</h3>
+                <span className="live-badge">Live</span>
+            </div>
+            <p className="hint">Which available agent(s) get rung when a caller reaches the front of the queue.</p>
+            <AuditTrail updatedAt={form.updated_at} updatedBy={form.updated_by} />
+
+            <label style={{ display: 'block', margin: 'var(--space-14) 0 var(--space-6)' }}>
+                Strategy
+                <select value={form.strategy} onChange={e => setForm({ ...form, strategy: e.target.value as RoutingConfig['strategy'] })}>
+                    {ROUTING_STRATEGIES.map(s => (
+                        <option key={s.value} value={s.value}>
+                            {s.label}
+                        </option>
+                    ))}
+                </select>
+            </label>
+            {selected && (
+                <p className="hint" style={{ marginTop: 'var(--space-6)' }}>
+                    {selected.description}
+                </p>
+            )}
+
+            {form.strategy === 'idle_top_n' && (
+                <label style={{ display: 'block', marginTop: 'var(--space-14)' }}>
+                    How many agents to ring at once
+                    <input
+                        type="number"
+                        min={1}
+                        max={20}
+                        value={form.top_n_group_size}
+                        onChange={e => setForm({ ...form, top_n_group_size: Number(e.target.value) })}
+                    />
+                </label>
+            )}
+
+            {form.strategy === 'idle_first_broadcast' && (
+                <label style={{ display: 'block', marginTop: 'var(--space-14)' }}>
+                    Seconds before broadening to everyone
+                    <input
+                        type="number"
+                        min={1}
+                        max={60}
+                        value={form.broadcast_fallback_seconds}
+                        onChange={e => setForm({ ...form, broadcast_fallback_seconds: Number(e.target.value) })}
+                    />
+                </label>
+            )}
+
+            <div className="modal-actions" style={{ justifyContent: 'flex-start', marginTop: 'var(--space-12)' }}>
+                <button
+                    className="btn btn-primary"
+                    disabled={!dirty || save.isPending || !groupSizeValid || !fallbackValid}
+                    onClick={() =>
+                        save.mutate({
+                            strategy: form.strategy,
+                            top_n_group_size: form.top_n_group_size,
+                            broadcast_fallback_seconds: form.broadcast_fallback_seconds
+                        })
+                    }
+                >
+                    Save routing settings
+                </button>
+            </div>
+        </div>
+    );
+}
+
 type HoldMusicConfig = {
     active_class: 'default' | 'custom';
     custom_filename?: string | null;
@@ -363,6 +518,8 @@ export default function CallForwarding() {
             <div className="settings-group-label">Live call routing — changes apply to the next call</div>
 
             <BusinessHoursPanel />
+
+            <RoutingConfigPanel />
 
             <div className="panel panel-header">
                 <div>
