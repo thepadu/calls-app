@@ -72,16 +72,20 @@ Everywhere in the app, a floating dialer and your status/presence control sit in
 
 ### How a call actually reaches you
 
-When a caller is waiting, Chumz Phone doesn't pick one agent to ring — it **rings every currently-Available agent's browser at the same time**. Whoever answers first gets the call, and the ringing stops for everyone else automatically. This means:
+By default, when a caller is waiting, Chumz Phone doesn't pick one agent to ring — it **rings every currently-Available agent's browser at the same time**. Whoever answers first gets the call, and the ringing stops for everyone else automatically.
 
-- You don't need to race to be first — if you're mid-conversation with a teammate or briefly away, someone else will pick it up.
+This is a supervisor-configurable setting (see [§13](#call-routing)), though, so your own team might be set up differently — some setups ring only the agent who's been Available the longest, either alone or followed by everyone else if they don't pick up fast enough, or one agent at a time in turn. If you're ever unsure why a call reached you specifically (or didn't), ask a supervisor which setting your team uses — it's one dropdown, visible to them on the Settings page.
+
+Whichever setting is active:
+
+- If you're rung alongside others, you don't need to race to be first — if you're mid-conversation with a teammate or briefly away, someone else will pick it up.
 - If nobody is Available, the call sits in the queue (see [§4](#4-the-live-queue)) until someone is, or until it's abandoned or forwarded (supervisors: see [§13](#call-forwarding-rules)).
 
 While you're being rung, your status automatically flips to **Ringing**, and once you answer, it flips to **On call** — both are automatic; you don't set them yourself (see the full list of statuses below).
 
 ![A caller waiting in the queue rings every available agent's browser at once; the first to answer connects, the rest stop ringing](docs/agent-guide/ring-all-flow.svg)
 
-*Nobody is singled out to take a call — everyone Available is rung together, and whoever answers first gets it.*
+*The default setup: nobody is singled out to take a call — everyone Available is rung together, and whoever answers first gets it. See [§13](#call-routing) for the other options a supervisor can choose instead.*
 
 ### Your presence status
 
@@ -374,11 +378,22 @@ Each row saves independently, and a live **call flow preview** on the same page 
 
 ### Call Forwarding & Settings (supervisor-only)
 
-Four panels live under Settings:
+Five panels live under Settings:
 
 #### Business Hours
 
 An on/off toggle, opening and closing time (East Africa Time), which days of the week are "open," and an after-hours message. Outside these hours, callers hear that message instead of the normal menu, and no agent needs to be online for this to work at all. Turning this **on** requires confirming the change, since it immediately affects what the very next caller outside those hours will hear; turning it off doesn't ask for confirmation, since disabling something is treated as the safe direction.
+
+#### Call routing
+
+Controls which Available agent(s) actually get rung for a new waiting caller — described from an agent's point of view in [§3](#how-a-call-actually-reaches-you). Pick one of four strategies from the dropdown:
+
+- **Ring everyone at once** — the default. Every Available agent's phone rings simultaneously; first to answer gets it.
+- **Ring the longest-idle few at once** — only the agents who've been Available the longest ring together (you choose how many).
+- **Ring the longest-idle agent first, then everyone** — only the single longest-idle agent rings at first; if they don't answer within a delay you set, it broadens to everyone else who's Available.
+- **Ring one at a time, longest-idle first** — strictly one agent at a time, always whoever's been waiting longest for a turn.
+
+"Longest-idle" is tracked automatically — an agent who just finished a call or just came back from a ring that went unanswered goes to the back of the line, nothing for anyone to manage by hand. A change here applies starting with the very next caller; nothing currently on a call or already ringing is affected. There's no confirmation prompt on this one (unlike the toggles below) — just pick a strategy, fill in the one extra field it asks for if it has one, and click Save.
 
 #### Call forwarding rules
 
@@ -392,7 +407,7 @@ A single toggle that, when on, plays a 1–5 rating prompt to the caller right a
 
 Upload a custom MP3 (up to 8MB) to replace the default music callers hear while on hold in the queue, or reset back to the default. This takes effect immediately, including for anyone already on hold at the moment you change it — nobody needs to redial to hear the new track.
 
-**A general rule across all four of these panels**: turning something **on** that changes what a live caller experiences always asks you to confirm first; turning it **off** never does, since disabling something is the reversible, lower-risk direction.
+**A general rule across the toggle-based panels above** (Business Hours, Call rating, and the forwarding/rating toggles below): turning something **on** that changes what a live caller experiences always asks you to confirm first; turning it **off** never does, since disabling something is the reversible, lower-risk direction. Call routing doesn't follow this pattern since it's a strategy choice, not an on/off switch — there's nothing to "turn on," just a setting to pick and save.
 
 ---
 
