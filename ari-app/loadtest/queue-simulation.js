@@ -518,14 +518,32 @@ async function main() {
     const numCustomers = Number(process.argv[2]) || 30;
     const numAgents = Number(process.argv[3]) || 4;
     const answerFailureRate = process.argv[4] !== undefined ? Number(process.argv[4]) : 0;
+    // Stress-test addition (2026-10-xx): lets the whole main loop (not just
+    // the isolated testRoutingStrategies scenario above) run under any of
+    // the 4 real strategies at real scale — invalid values fall back to
+    // 'ring_all' via the same default selectRingCandidates itself uses.
+    const strategy = process.argv[5] || 'ring_all';
 
     __setTestClient(makeFakeClient({ answerFailureRate }));
+    fakeRoutingConfig.strategy = strategy;
+    fakeRoutingConfig.top_n_group_size = Number(process.argv[6]) || 3;
+    fakeRoutingConfig.broadcast_fallback_seconds = Number(process.argv[7]) || 8;
 
+    const now = Date.now();
     for (let i = 1; i <= numAgents; i++) {
-        fakeAgents.push({ id: i, name: `Agent${i}`, sipUsername: `agent${i}`, status: 'available' });
+        // Staggered idle times (oldest first) rather than all-identical —
+        // at real scale, agents genuinely vary in how long they've been
+        // waiting, and the non-default strategies' whole point is ordering
+        // by that. All-equal availableSince would make every run
+        // indistinguishable from insertion order, not a real stress case.
+        fakeAgents.push({ id: i, name: `Agent${i}`, sipUsername: `agent${i}`, status: 'available', availableSince: now - (numAgents - i) * 1000 });
     }
 
-    console.log(`Simulating ${numCustomers} customers against ${numAgents} agents (answerFailureRate=${answerFailureRate})...`);
+    console.log(
+        `Simulating ${numCustomers} customers against ${numAgents} agents (answerFailureRate=${answerFailureRate}, strategy=${strategy}` +
+            `${strategy === 'idle_top_n' ? `, top_n_group_size=${fakeRoutingConfig.top_n_group_size}` : ''}` +
+            `${strategy === 'idle_first_broadcast' ? `, broadcast_fallback_seconds=${fakeRoutingConfig.broadcast_fallback_seconds}` : ''})...`
+    );
 
     const customerChannels = [];
     for (let i = 1; i <= numCustomers; i++) {
