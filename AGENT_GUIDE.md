@@ -115,6 +115,8 @@ The active-call bar gives you:
 - **Hold** — puts the caller on hold with hold music (see [§13](#hold-music) for how that music is chosen).
 - **Speaker toggle** — switches audio output, if your browser supports choosing an output device. Not every browser does (Safari and Firefox notably don't expose this), so this control may not appear for you.
 
+A **Weak connection** badge can also appear above the timer mid-call. It's based on what the *other person's* side is actually receiving from you, not what you hear — so it's a real, useful signal even if the call sounds completely normal to you. It only shows up after roughly 40 seconds of sustained trouble (not a brief blip), so treat it as worth acting on: if you see it, it's a reasonable moment to ask the caller if they're still hearing you clearly, and to consider switching networks (e.g. wifi to mobile data) if it persists.
+
 If a caller reports hearing their own voice echoed back, it's almost always because you're using your laptop's built-in speakers rather than a headset — the speaker output is being picked back up by the microphone. Switching to a headset resolves it immediately; there's no setting in the app that fixes this, since it's a physical acoustic issue, not a software one.
 
 The call keeps working through minor hiccups on its own: if your wifi briefly drops or your network changes, the softphone tries to recover the connection for a few seconds before giving up. If the caller is still there when it reconnects, you'll notice nothing beyond a short gap. Only if it can't recover does the call actually end.

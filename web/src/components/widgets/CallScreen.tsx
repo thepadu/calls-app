@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { Phone, PhoneOff, Mic, MicOff, Pause, Play, UserPlus, Ticket as TicketIcon, X, Volume2, Speaker } from 'lucide-react';
+import { Phone, PhoneOff, Mic, MicOff, Pause, Play, UserPlus, Ticket as TicketIcon, X, Volume2, Speaker, WifiOff } from 'lucide-react';
 import { useSoftphone } from '../../lib/softphone';
 import { useActiveCall } from '../../lib/activeCall';
 import { apiFetch } from '../../lib/api';
@@ -131,6 +131,7 @@ export default function CallScreen() {
         incomingCall,
         outgoingCall,
         activeCall: softphoneCall,
+        connectionQuality,
         answer,
         reject,
         cancelOutgoingCall,
@@ -310,6 +311,15 @@ export default function CallScreen() {
                         <span className="call-screen-reconnecting"> — reconnecting your phone…</span>
                     )}
                 </div>
+                {phase === 'active' && softphoneCall && connectionQuality === 'weak' && (
+                    <div
+                        className="call-screen-weak-connection"
+                        title="Based on reports from the other side of the call — sustained over the last ~40 seconds, not a one-off blip"
+                    >
+                        <WifiOff size={14} />
+                        <span>Weak connection</span>
+                    </div>
+                )}
                 {phase === 'active' && addPartyStatus && (
                     <div className={`call-screen-add-party-status ${addPartyStatus === 'failed' ? 'call-screen-add-party-failed' : ''}`}>
                         {ADD_PARTY_LABELS[addPartyStatus]}

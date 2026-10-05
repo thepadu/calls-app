@@ -7,6 +7,12 @@ import { useToast } from './toast';
 import { isCallInProgress, setCallInProgress } from './callState';
 
 export type RegistrationState = 'unregistered' | 'registering' | 'registered' | 'failed';
+// Phase 2 of the 2026-10-05 "breaking up" call-quality investigation (see
+// DECISIONS.md) — 'unknown' until the first real sample comes back (the
+// browser doesn't always populate remote-inbound-rtp immediately), 'good'
+// is the quiet default so this never draws attention to itself on a call
+// that's actually fine.
+export type ConnectionQuality = 'unknown' | 'good' | 'weak';
 
 type IncomingCall = { session: Invitation; callerNumber: string };
 type OutgoingCall = { session: Inviter; remoteNumber: string };
@@ -17,6 +23,7 @@ type SoftphoneContextValue = {
     incomingCall: IncomingCall | null;
     outgoingCall: OutgoingCall | null;
     activeCall: ActiveCall | null;
+    connectionQuality: ConnectionQuality;
     answer: () => Promise<void>;
     reject: () => void;
     hangup: () => void;
@@ -37,6 +44,7 @@ const SoftphoneContext = createContext<SoftphoneContextValue>({
     incomingCall: null,
     outgoingCall: null,
     activeCall: null,
+    connectionQuality: 'unknown',
     answer: async () => {},
     reject: () => {},
     hangup: () => {},
@@ -179,7 +187,28 @@ function reportClientDiagnostic(eventType: string, callDurationSeconds?: number,
 // (TURN) path is more exposed to added latency/jitter than a direct one.
 const CALL_QUALITY_SAMPLE_INTERVAL_MS = 20000;
 
-async function sampleCallQuality(session: Session, startedAt: number) {
+// Phase 2 (same investigation): a loss-rate computed from one cumulative
+// snapshot is meaningless (packetsLost only ever goes up) — these two
+// thresholds apply to the *delta* between consecutive samples instead, see
+// sampleCallQuality below. 3% matches the rough point real-time audio
+// codecs stop concealing loss cleanly; 30ms jitter is a commonly-cited
+// "starts being audible" threshold for interactive voice. Two consecutive
+// bad samples (40s sustained, not one noisy blip) before ever showing
+// "weak" to the agent — a single bad sample is normal background noise on
+// real networks and would make the indicator flicker constantly if it
+// fired on that alone.
+const CALL_QUALITY_LOSS_RATE_THRESHOLD = 3;
+const CALL_QUALITY_JITTER_MS_THRESHOLD = 30;
+const CALL_QUALITY_BAD_SAMPLES_BEFORE_WEAK = 2;
+
+type CallQualityTrackerState = { prevPacketsLost: number | null; prevPacketsSent: number | null; consecutiveBadSamples: number };
+
+async function sampleCallQuality(
+    session: Session,
+    startedAt: number,
+    tracker: CallQualityTrackerState,
+    onQualityChange: (quality: ConnectionQuality) => void
+) {
     const pc = (session.sessionDescriptionHandler as unknown as { peerConnection: RTCPeerConnection })
         ?.peerConnection;
     if (!pc || session.state !== SessionState.Established) return;
@@ -200,9 +229,11 @@ async function sampleCallQuality(session: Session, startedAt: number) {
     });
 
     let remoteInboundAudio: Record<string, unknown> | undefined;
+    let outboundAudio: Record<string, unknown> | undefined;
     let activeCandidatePair: Record<string, unknown> | undefined;
     byId.forEach(report => {
         if (report.type === 'remote-inbound-rtp' && report.kind === 'audio') remoteInboundAudio = report;
+        if (report.type === 'outbound-rtp' && report.kind === 'audio') outboundAudio = report;
         if (report.type === 'candidate-pair' && report.nominated && report.state === 'succeeded') activeCandidatePair = report;
     });
 
@@ -216,16 +247,42 @@ async function sampleCallQuality(session: Session, startedAt: number) {
     if (typeof remoteInboundAudio?.jitter === 'number') parts.push(`jitterMs=${Math.round(remoteInboundAudio.jitter * 1000)}`);
     if (typeof remoteInboundAudio?.roundTripTime === 'number') parts.push(`rttMs=${Math.round(remoteInboundAudio.roundTripTime * 1000)}`);
     if (typeof localCandidateType === 'string') parts.push(`path=${localCandidateType}`);
+
+    // Classify this sample against the *delta* since the previous one —
+    // packetsLost/packetsSent are both cumulative since the call started,
+    // so only the change over this interval means anything as a rate.
+    // Skipped on the first sample of a call (nothing to diff against yet)
+    // and defensively if either counter ever appears to go backwards
+    // (a stats-collection quirk, not a real negative loss).
+    const packetsLost = typeof remoteInboundAudio?.packetsLost === 'number' ? remoteInboundAudio.packetsLost : null;
+    const packetsSent = typeof outboundAudio?.packetsSent === 'number' ? outboundAudio.packetsSent : null;
+    const jitterMs = typeof remoteInboundAudio?.jitter === 'number' ? remoteInboundAudio.jitter * 1000 : null;
+
+    if (packetsLost !== null && packetsSent !== null && tracker.prevPacketsLost !== null && tracker.prevPacketsSent !== null) {
+        const deltaLost = packetsLost - tracker.prevPacketsLost;
+        const deltaSent = packetsSent - tracker.prevPacketsSent;
+        if (deltaLost >= 0 && deltaSent > 0) {
+            const lossRatePercent = (deltaLost / deltaSent) * 100;
+            const isBadSample = lossRatePercent > CALL_QUALITY_LOSS_RATE_THRESHOLD || (jitterMs !== null && jitterMs > CALL_QUALITY_JITTER_MS_THRESHOLD);
+            tracker.consecutiveBadSamples = isBadSample ? tracker.consecutiveBadSamples + 1 : 0;
+            onQualityChange(tracker.consecutiveBadSamples >= CALL_QUALITY_BAD_SAMPLES_BEFORE_WEAK ? 'weak' : 'good');
+            parts.push(`lossRatePercent=${lossRatePercent.toFixed(1)}`);
+        }
+    }
+    if (packetsLost !== null) tracker.prevPacketsLost = packetsLost;
+    if (packetsSent !== null) tracker.prevPacketsSent = packetsSent;
+
     if (parts.length === 0) return; // browser didn't populate anything usable this round
 
     const callDurationSeconds = Math.round((Date.now() - startedAt) / 1000);
     reportClientDiagnostic('call_quality_sample', callDurationSeconds, parts.join(' '));
 }
 
-function watchCallQuality(session: Session) {
+function watchCallQuality(session: Session, onQualityChange: (quality: ConnectionQuality) => void) {
     const startedAt = Date.now();
+    const tracker: CallQualityTrackerState = { prevPacketsLost: null, prevPacketsSent: null, consecutiveBadSamples: 0 };
     const interval = setInterval(() => {
-        sampleCallQuality(session, startedAt).catch(() => {});
+        sampleCallQuality(session, startedAt, tracker, onQualityChange).catch(() => {});
     }, CALL_QUALITY_SAMPLE_INTERVAL_MS);
     session.stateChange.addListener(state => {
         if (state === SessionState.Terminated) clearInterval(interval);
@@ -314,6 +371,7 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
     const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
     const [outgoingCall, setOutgoingCall] = useState<OutgoingCall | null>(null);
     const [activeCall, setActiveCall] = useState<ActiveCall | null>(null);
+    const [connectionQuality, setConnectionQuality] = useState<ConnectionQuality>('unknown');
     const [speakerOn, setSpeakerOn] = useState(false);
     // Bumping this tears down and fully rebuilds the connection (fresh
     // credentials fetch, fresh UserAgent, fresh registration) via the main
@@ -370,7 +428,7 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
                 showToast('Call audio may have been lost — confirm with the customer or end and redial', 'error')
             );
             watchLocalTrackHealth(session);
-            watchCallQuality(session);
+            watchCallQuality(session, setConnectionQuality);
             setActiveCall({ session, remoteNumber, muted: false, held: false, startedAt: Date.now() });
         },
         [showToast]
@@ -389,6 +447,7 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
             (remoteAudioRef.current as SinkableAudioElement).setSinkId?.('').catch(() => {});
         }
         setActiveCall(null);
+        setConnectionQuality('unknown');
         setSpeakerOn(false);
     }, []);
 
@@ -827,6 +886,7 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
         if (session.state === SessionState.Established) session.bye().catch(warnIfCallActionFails);
         else (session as Invitation).reject?.().catch(warnIfCallActionFails);
         setActiveCall(null);
+        setConnectionQuality('unknown');
     }, [activeCall, warnIfCallActionFails]);
 
     const toggleMute = useCallback(() => {
@@ -1006,6 +1066,7 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
                 incomingCall,
                 outgoingCall,
                 activeCall,
+                connectionQuality,
                 answer,
                 reject,
                 hangup,

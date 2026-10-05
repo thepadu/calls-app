@@ -2057,6 +2057,20 @@ textarea {
     margin-bottom: var(--space-10);
 }
 
+/* Quiet by design — only ever appears after ~40s of sustained poor
+   call-quality samples (see watchCallQuality in lib/softphone.tsx), never
+   on a brief blip, so it shouldn't need to shout once it does show up. */
+.call-screen-weak-connection {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-6);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--warning);
+    margin-bottom: var(--space-10);
+}
+
 .call-screen-add-party-failed {
     color: var(--danger);
 }
