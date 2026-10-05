@@ -2478,27 +2478,41 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         res.json({ ok: true });
     });
 
-    // ── Client diagnostics (Phase 1 of the 2026-09-27 echo investigation) ──
+    // ── Client diagnostics (Phase 1 of the 2026-09-27 echo investigation,
+    // extended 2026-10-05 for the "breaking up" call-quality investigation)
+    // ──
     // See DECISIONS.md and migrations/030_client_diagnostics.sql. Reports a
     // softphone-side recovery event (an ICE restart attempt/outcome, a
-    // WebSocket disconnect/reconnect) that previously only ever reached that
-    // agent's own browser console — unrecoverable once the tab closed, which
-    // is exactly what made the reported mid-call echo unprovable after the
-    // fact. This must never affect the softphone itself: the frontend calls
-    // this fire-and-forget (no await in any call-handling path), and this
-    // route never throws past a plain best-effort insert.
+    // WebSocket disconnect/reconnect) or a periodic call-quality sample
+    // (packet loss/jitter/RTT as reported by the far end, plus which kind
+    // of network path carried the call) that previously only ever reached
+    // that agent's own browser console or nowhere at all — unrecoverable
+    // once the tab closed, which is exactly what made both the reported
+    // mid-call echo and a later "you were breaking up" report unprovable
+    // after the fact. This must never affect the softphone itself: the
+    // frontend calls this fire-and-forget (no await in any call-handling
+    // path), and this route never throws past a plain best-effort insert.
     const CLIENT_DIAGNOSTIC_EVENT_TYPES = [
         'ice_restart_attempt',
         'ice_restart_recovered',
         'ice_restart_failed',
         'ws_disconnect',
-        'ws_reconnect'
+        'ws_reconnect',
+        'call_quality_sample'
     ];
     // Only the failure-shaped events are worth an alert — 'attempt'/
     // 'recovered'/'ws_reconnect' just mean the existing recovery logic did
     // its job, which is normal and expected on real-world networks, not a
     // signal on its own (same reasoning ghost-agent reconciliation in
     // ari-app already applies to a single stale-tab reconcile).
+    // 'call_quality_sample' is deliberately excluded too, for a different
+    // reason — it fires every ~20s on every single call by design, so
+    // alerting on its mere presence would page someone constantly. A real
+    // quality-based alert (e.g. packet loss over some threshold) needs
+    // parsing its `detail` string and a threshold worth trusting — not
+    // worth guessing at before there's enough real samples to know what
+    // "bad" actually looks like on this system. Revisit once this has run
+    // for a while.
     const CONCERNING_EVENT_TYPES = ['ice_restart_failed', 'ws_disconnect'];
     const DIAGNOSTIC_FLAP_WINDOW_MS = 60 * 60 * 1000;
     const DIAGNOSTIC_FLAP_THRESHOLD = 3;

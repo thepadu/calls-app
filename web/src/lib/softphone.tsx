@@ -165,6 +165,73 @@ function reportClientDiagnostic(eventType: string, callDurationSeconds?: number,
     }).catch(() => {});
 }
 
+// Phase 1 of the 2026-10-05 "breaking up" call-quality investigation (see
+// DECISIONS.md): that investigation had only connectivity-*failure*
+// signals to go on (ICE restart, WS disconnect) — neither fired for the
+// reported call, meaning the softphone itself never detected anything
+// severe enough to notice, which made it impossible to tell whether real
+// packet loss/jitter happened at all. This periodically samples
+// `remote-inbound-rtp` — RTCP receiver reports the *far end* sends back
+// describing what it's actually receiving of THIS agent's own outbound
+// audio, which is exactly the direction a caller who says "you were
+// breaking up" is describing (not what the agent hears). Also records
+// which kind of ICE candidate ended up carrying the call — a relayed
+// (TURN) path is more exposed to added latency/jitter than a direct one.
+const CALL_QUALITY_SAMPLE_INTERVAL_MS = 20000;
+
+async function sampleCallQuality(session: Session, startedAt: number) {
+    const pc = (session.sessionDescriptionHandler as unknown as { peerConnection: RTCPeerConnection })
+        ?.peerConnection;
+    if (!pc || session.state !== SessionState.Established) return;
+
+    let stats: RTCStatsReport;
+    try {
+        stats = await pc.getStats();
+    } catch {
+        return; // not fatal — just skip this round, the call itself is unaffected
+    }
+
+    // Built by hand rather than relying on RTCStatsReport's own .get() —
+    // not every TS DOM lib version types it as a real Map, but .forEach()
+    // is guaranteed by the interface either way.
+    const byId = new Map<string, Record<string, unknown>>();
+    stats.forEach((report: Record<string, unknown>) => {
+        if (typeof report.id === 'string') byId.set(report.id, report);
+    });
+
+    let remoteInboundAudio: Record<string, unknown> | undefined;
+    let activeCandidatePair: Record<string, unknown> | undefined;
+    byId.forEach(report => {
+        if (report.type === 'remote-inbound-rtp' && report.kind === 'audio') remoteInboundAudio = report;
+        if (report.type === 'candidate-pair' && report.nominated && report.state === 'succeeded') activeCandidatePair = report;
+    });
+
+    let localCandidateType: unknown;
+    if (typeof activeCandidatePair?.localCandidateId === 'string') {
+        localCandidateType = byId.get(activeCandidatePair.localCandidateId)?.candidateType;
+    }
+
+    const parts: string[] = [];
+    if (typeof remoteInboundAudio?.packetsLost === 'number') parts.push(`packetsLost=${remoteInboundAudio.packetsLost}`);
+    if (typeof remoteInboundAudio?.jitter === 'number') parts.push(`jitterMs=${Math.round(remoteInboundAudio.jitter * 1000)}`);
+    if (typeof remoteInboundAudio?.roundTripTime === 'number') parts.push(`rttMs=${Math.round(remoteInboundAudio.roundTripTime * 1000)}`);
+    if (typeof localCandidateType === 'string') parts.push(`path=${localCandidateType}`);
+    if (parts.length === 0) return; // browser didn't populate anything usable this round
+
+    const callDurationSeconds = Math.round((Date.now() - startedAt) / 1000);
+    reportClientDiagnostic('call_quality_sample', callDurationSeconds, parts.join(' '));
+}
+
+function watchCallQuality(session: Session) {
+    const startedAt = Date.now();
+    const interval = setInterval(() => {
+        sampleCallQuality(session, startedAt).catch(() => {});
+    }, CALL_QUALITY_SAMPLE_INTERVAL_MS);
+    session.stateChange.addListener(state => {
+        if (state === SessionState.Terminated) clearInterval(interval);
+    });
+}
+
 function watchIceConnection(session: Session, onRestartFailed: () => void) {
     const pc = (session.sessionDescriptionHandler as unknown as { peerConnection: RTCPeerConnection })
         ?.peerConnection;
@@ -303,6 +370,7 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
                 showToast('Call audio may have been lost — confirm with the customer or end and redial', 'error')
             );
             watchLocalTrackHealth(session);
+            watchCallQuality(session);
             setActiveCall({ session, remoteNumber, muted: false, held: false, startedAt: Date.now() });
         },
         [showToast]
