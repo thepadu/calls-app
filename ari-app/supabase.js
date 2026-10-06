@@ -134,7 +134,25 @@ async function getAvailableAgentsWithSip() {
     return data.filter(a => a.agent_sip_credentials?.sip_username);
 }
 
+// Cached rather than read fresh on every call — found during a 2026-10-05
+// stress test to be a real, avoidable contributor to load: this row only
+// ever changes when a supervisor edits Settings (rare), but dequeueNext
+// was paying a full Supabase round trip for it on every single dequeue
+// attempt, the hottest path in the whole system. 15s is comfortably short
+// enough that a strategy change still takes effect within a couple of
+// queue polls (QUEUE_POLL_MS = 3000) — not meaningfully different from
+// "instant" to a real caller. A handful of concurrent calls racing to
+// refetch right at the TTL boundary is harmless and not worth guarding
+// against (unlike tts.js's inFlight map, there's no expensive synthesis
+// work to deduplicate here, just one extra occasional read).
+const ROUTING_CONFIG_CACHE_MS = 15000;
+let routingConfigCache = null; // { value, fetchedAt }
+
 async function getRoutingConfig() {
+    if (routingConfigCache && Date.now() - routingConfigCache.fetchedAt < ROUTING_CONFIG_CACHE_MS) {
+        return routingConfigCache.value;
+    }
+
     const { data, error } = await supabase
         .from('routing_config')
         .select('strategy, top_n_group_size, broadcast_fallback_seconds')
@@ -142,11 +160,15 @@ async function getRoutingConfig() {
         .maybeSingle();
     if (error || !data) {
         if (error) console.error('❌ Failed to load routing config, defaulting to ring_all:', error.message);
-        // ring_all is the historical, only-ever-shipped behavior — the
-        // correct fallback if the row is ever missing/unreadable, not a
-        // narrower strategy that could leave a real caller under-rung.
+        // Not cached — a transient blip shouldn't be remembered as
+        // 'ring_all' for the full TTL once Supabase recovers; ring_all is
+        // the historical, only-ever-shipped behavior and the correct
+        // fallback regardless, every tick that still fails just hits this
+        // same branch again.
         return { strategy: 'ring_all', top_n_group_size: 2, broadcast_fallback_seconds: 8 };
     }
+
+    routingConfigCache = { value: data, fetchedAt: Date.now() };
     return data;
 }
 
