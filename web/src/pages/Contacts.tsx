@@ -104,7 +104,7 @@ export default function Contacts() {
             return;
         }
         if (!isValidPhone(formatPhone(phone))) {
-            setFormError('Enter a valid Kenyan number (e.g. 0712345678 or +254712345678)');
+            setFormError('Enter a valid number (e.g. 0712345678), or a full international number starting with +');
             return;
         }
         setFormError('');

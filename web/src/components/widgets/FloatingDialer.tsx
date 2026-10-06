@@ -37,7 +37,7 @@ export default function FloatingDialer() {
         const phone = formatPhone(input);
 
         if (!isValidPhone(phone)) {
-            setError('Enter a valid Kenyan number');
+            setError('Enter a valid number (e.g. 0712345678), or a full international number starting with +');
             return;
         }
 

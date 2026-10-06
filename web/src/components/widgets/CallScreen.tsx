@@ -204,7 +204,7 @@ export default function CallScreen() {
         if (addParty.isPending) return;
         const phone = formatPhone(addPartyInput);
         if (!isValidPhone(phone)) {
-            showToast('Enter a valid Kenyan number', 'error');
+            showToast('Enter a valid number (e.g. 0712345678), or a full international number starting with +', 'error');
             return;
         }
         addParty.mutate(`+${phone}`);

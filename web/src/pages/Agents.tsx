@@ -113,7 +113,7 @@ export default function Agents() {
         // through the modern SIP flow and has never had one.
         const phoneEntered = form.phone.trim().length > 0;
         if ((!editingId || phoneEntered) && !isValidPhone(formatPhone(form.phone))) {
-            setFormError('Enter a valid Kenyan number (e.g. 0712345678 or +254712345678)');
+            setFormError('Enter a valid number (e.g. 0712345678), or a full international number starting with +');
             return;
         }
         setFormError('');

@@ -151,7 +151,9 @@ The floating dialer, available on every page, places both outbound and internal 
 
 ### Calling an outside number
 
-Type a local number the normal way you'd say it out loud — e.g. `0712345678`. You don't need to add the country code yourself; the dialer reformats it automatically. Only Kenyan mobile numbers are supported today (numbers starting `07…` or `01…`); anything else will be rejected as invalid before it ever dials out.
+Type a local number the normal way you'd say it out loud — e.g. `0712345678`. You don't need to add the country code yourself; the dialer reformats it automatically.
+
+For a number outside Kenya, type it in full international format starting with `+` (e.g. `+3272232362`) — the dialer recognizes the `+` and dials it as-is rather than trying to treat it as a local Kenyan number. Anything that's neither a valid Kenyan mobile number nor a plausible `+`-prefixed international number is rejected before it ever dials out.
 
 ### Calling a teammate
 
