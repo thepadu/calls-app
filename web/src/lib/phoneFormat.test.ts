@@ -25,6 +25,10 @@ describe('formatPhone', () => {
     it('strips the + and whitespace from a spaced-out Kenya landline number', () => {
         expect(formatPhone('+254 20 7640622')).toBe('254207640622');
     });
+
+    it('converts a redundant "+0..." (a + and a local leading 0 both present) fully to 254, not just stripping the +', () => {
+        expect(formatPhone('+0207640622')).toBe('254207640622');
+    });
 });
 
 describe('isValidPhone', () => {

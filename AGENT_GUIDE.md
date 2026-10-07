@@ -113,6 +113,8 @@ The active-call bar gives you:
 
 - **Mute** — mutes your microphone; the caller can't hear you but you can still hear them.
 - **Hold** — puts the caller on hold with hold music (see [§13](#hold-music) for how that music is chosen).
+- **Add Call** — brings a third party into the call once they answer, for a quick three-way conversation.
+- **Keypad** — opens a touch-tone dialpad for sending DTMF tones *into the call itself*, not the dashboard. Use this when the number you've called has its own menu (e.g. "press 1 for English, 2 for French") — the tones go out over the real call, exactly as if you'd pressed them on a physical phone, and what you've sent shows above the keypad so you can confirm it registered.
 - **Speaker toggle** — switches audio output, if your browser supports choosing an output device. Not every browser does (Safari and Firefox notably don't expose this), so this control may not appear for you.
 
 A **Weak connection** badge can also appear above the timer mid-call. It's based on what the *other person's* side is actually receiving from you, not what you hear — so it's a real, useful signal even if the call sounds completely normal to you. It only shows up after roughly 40 seconds of sustained trouble (not a brief blip), so treat it as worth acting on: if you see it, it's a reasonable moment to ask the caller if they're still hearing you clearly, and to consider switching networks (e.g. wifi to mobile data) if it persists.

@@ -9,10 +9,17 @@
 // validation matches how the backend (calls-app/lib/phone.js's
 // isValidE164) already treats this exact boundary.
 export function formatPhone(phone: string): string {
-    const trimmed = phone.replace(/\s+/g, '').trim();
-    if (trimmed.startsWith('0')) return '254' + trimmed.substring(1);
-    if (trimmed.startsWith('+')) return trimmed.substring(1);
-    return trimmed;
+    let digits = phone.replace(/\s+/g, '').trim();
+    // Sequential, not two independent branches — a "+" is stripped first
+    // regardless, so a redundant "+0..." (a + and a local-format leading 0
+    // both present, e.g. a copy-pasted number someone "corrected" by hand)
+    // still gets its 0 converted to 254 afterward, rather than being left
+    // as a malformed "0..." destination with no country code at all. Found
+    // live: this is exactly what two of five attempts at a real Kenya
+    // landline number produced before this fix.
+    if (digits.startsWith('+')) digits = digits.substring(1);
+    if (digits.startsWith('0')) digits = '254' + digits.substring(1);
+    return digits;
 }
 
 // formatPhone above always returns bare digits (every call site re-adds

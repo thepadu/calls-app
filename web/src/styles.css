@@ -2081,6 +2081,45 @@ textarea {
     text-align: center;
 }
 
+.call-screen-keypad {
+    margin-bottom: var(--space-14);
+}
+
+.call-screen-keypad-history {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600;
+    letter-spacing: 2px;
+    text-align: center;
+    min-height: 1.2em;
+    margin-bottom: var(--space-8);
+    color: var(--ink);
+}
+
+.call-screen-keypad-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-8);
+}
+
+.call-screen-keypad-key {
+    aspect-ratio: 1;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: var(--page-bg);
+    color: var(--ink);
+    font-size: 18px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.call-screen-keypad-key:hover {
+    background: var(--border);
+}
+
+.call-screen-keypad-key:active {
+    transform: scale(0.95);
+}
+
 .call-screen-primary-actions {
     display: flex;
     gap: 32px;

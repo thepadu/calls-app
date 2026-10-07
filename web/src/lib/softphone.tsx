@@ -30,6 +30,7 @@ type SoftphoneContextValue = {
     cancelOutgoingCall: () => void;
     toggleMute: () => void;
     toggleHold: () => void;
+    sendDtmf: (tone: string) => boolean;
     placeCall: (destinationE164: string) => Promise<void>;
     placeInternalCall: (targetAgentId: number, displayName: string) => Promise<void>;
     audioOutputSupported: boolean;
@@ -51,6 +52,7 @@ const SoftphoneContext = createContext<SoftphoneContextValue>({
     cancelOutgoingCall: () => {},
     toggleMute: () => {},
     toggleHold: () => {},
+    sendDtmf: () => false,
     placeCall: async () => {},
     placeInternalCall: async () => {},
     audioOutputSupported: false,
@@ -96,6 +98,20 @@ function getAudioSender(session: Session) {
     const pc = (session.sessionDescriptionHandler as unknown as { peerConnection: RTCPeerConnection })
         ?.peerConnection;
     return pc?.getSenders().find(s => s.track?.kind === 'audio') ?? null;
+}
+
+// Sent via RTP (RFC 4733), the same mechanism every real phone and every
+// destination's own IVR expects — this is NOT a locally-played tone, it's
+// a real signal carried in the call's own media stream, so a destination
+// IVR menu (e.g. "press 1 for English") reacts to it exactly as if it had
+// been pressed on a physical phone. sip.js's own sendDtmf() wraps the
+// browser's RTCDTMFSender under the hood; typed by hand (same pattern as
+// every other sessionDescriptionHandler access in this file) since this
+// method isn't part of SIP.js's public Session type, only its internal
+// SessionDescriptionHandler interface.
+function sendDtmfTone(session: Session, tone: string): boolean {
+    const sdh = session.sessionDescriptionHandler as unknown as { sendDtmf?: (tones: string, options?: unknown) => boolean };
+    return sdh?.sendDtmf?.(tone) ?? false;
 }
 
 // Backgrounding the tab/PWA (switching apps mid-call on mobile) commonly
@@ -920,6 +936,16 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
         setActiveCall({ ...activeCall, held: nextHeld });
     }, [activeCall, showToast]);
 
+    const sendDtmf = useCallback(
+        (tone: string) => {
+            if (!activeCall) return false;
+            const sent = sendDtmfTone(activeCall.session, tone);
+            if (!sent) showToast('Could not send that tone — check your connection', 'error');
+            return sent;
+        },
+        [activeCall, showToast]
+    );
+
     // "Earpiece by default, speaker on request" is the real product intent,
     // but browsers don't expose a distinct earpiece device to switch to —
     // enumerateDevices() just lists whatever named outputs the OS reports,
@@ -1073,6 +1099,7 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
                 cancelOutgoingCall,
                 toggleMute,
                 toggleHold,
+                sendDtmf,
                 placeCall,
                 placeInternalCall,
                 audioOutputSupported,

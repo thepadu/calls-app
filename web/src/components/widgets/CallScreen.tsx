@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { Phone, PhoneOff, Mic, MicOff, Pause, Play, UserPlus, Ticket as TicketIcon, X, Volume2, Speaker, WifiOff } from 'lucide-react';
+import { Phone, PhoneOff, Mic, MicOff, Pause, Play, UserPlus, Ticket as TicketIcon, X, Volume2, Speaker, WifiOff, Grid3x3 } from 'lucide-react';
 import { useSoftphone } from '../../lib/softphone';
 import { useActiveCall } from '../../lib/activeCall';
 import { apiFetch } from '../../lib/api';
@@ -137,6 +137,7 @@ export default function CallScreen() {
         cancelOutgoingCall,
         toggleMute,
         toggleHold,
+        sendDtmf,
         hangup,
         audioOutputSupported,
         speakerOn,
@@ -149,6 +150,13 @@ export default function CallScreen() {
     const [seconds, setSeconds] = useState(0);
     const [addPartyOpen, setAddPartyOpen] = useState(false);
     const [addPartyInput, setAddPartyInput] = useState('');
+    const [keypadOpen, setKeypadOpen] = useState(false);
+    // Just a visible record of what's been sent this call, reset each time
+    // a new one starts — real softphones show this so an agent can
+    // confirm "did my press actually register" at a glance, since DTMF
+    // sent over RTP has no audible local feedback of its own the way a
+    // physical phone's keypad does.
+    const [dtmfHistory, setDtmfHistory] = useState('');
     const showToast = useToast();
     const queryClient = useQueryClient();
 
@@ -231,6 +239,16 @@ export default function CallScreen() {
     // Precedence matches the old banners' own rule (OutgoingCallBanner hid
     // itself if an incomingCall was somehow ringing at the same instant).
     const phase = incomingCall ? 'incoming' : outgoingCall ? 'outgoing' : activeCaller ? 'active' : null;
+
+    // Keyed on the session itself, not just "is a call active" — without
+    // this, a fresh call right after one where the keypad was used starts
+    // with the previous call's pressed-digit history still showing, which
+    // reads as "did these get sent on THIS call?" rather than being an
+    // obviously stale leftover.
+    useEffect(() => {
+        setKeypadOpen(false);
+        setDtmfHistory('');
+    }, [softphoneCall?.session]);
 
     // `phase === 'active'` with no softphoneCall means we're relying purely
     // on the server poll — either a brief, self-resolving gap right after
@@ -374,6 +392,14 @@ export default function CallScreen() {
                                         <UserPlus size={20} />
                                         <span>Add Call</span>
                                     </button>
+                                    <button
+                                        className={`call-screen-control ${keypadOpen ? 'call-screen-control-active' : ''}`}
+                                        onClick={() => setKeypadOpen(open => !open)}
+                                        title="Send touch-tones — for a destination's own menu (e.g. 'press 1 for English')"
+                                    >
+                                        <Grid3x3 size={20} />
+                                        <span>Keypad</span>
+                                    </button>
                                     {audioOutputSupported && (
                                         <button
                                             className={`call-screen-control ${speakerOn ? 'call-screen-control-active' : ''}`}
@@ -403,6 +429,29 @@ export default function CallScreen() {
                                 placeholder="Number to add"
                                 className="call-screen-add-party-input"
                             />
+                        )}
+                        {softphoneCall && keypadOpen && (
+                            <div className="call-screen-keypad">
+                                {/* Reserves space even empty, rather than the grid below
+                                    shifting position the moment a first digit is sent. */}
+                                <div className="call-screen-keypad-history" aria-live="polite">
+                                    {dtmfHistory || ' '}
+                                </div>
+                                <div className="call-screen-keypad-grid">
+                                    {['1', '2', '3', '4', '5', '6', '7', '8', '9', '*', '0', '#'].map(key => (
+                                        <button
+                                            key={key}
+                                            type="button"
+                                            className="call-screen-keypad-key"
+                                            onClick={() => {
+                                                if (sendDtmf(key)) setDtmfHistory(h => h + key);
+                                            }}
+                                        >
+                                            {key}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
                         )}
                         {softphoneCall ? (
                             <button className="call-screen-round-btn call-screen-btn-end" onClick={hangup} aria-label="End call">
