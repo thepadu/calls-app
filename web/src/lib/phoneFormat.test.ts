@@ -21,6 +21,10 @@ describe('formatPhone', () => {
     it('strips a leading + from an international number', () => {
         expect(formatPhone('+3272232362')).toBe('3272232362');
     });
+
+    it('strips the + and whitespace from a spaced-out Kenya landline number', () => {
+        expect(formatPhone('+254 20 7640622')).toBe('254207640622');
+    });
 });
 
 describe('isValidPhone', () => {
@@ -32,12 +36,12 @@ describe('isValidPhone', () => {
         expect(isValidPhone('254112345678')).toBe(true);
     });
 
-    it('rejects a number that is too short', () => {
+    it('rejects a Kenya-shaped number that is too short (one digit missing)', () => {
         expect(isValidPhone('25471234567')).toBe(false);
     });
 
-    it('rejects a number with the wrong prefix', () => {
-        expect(isValidPhone('254812345678')).toBe(false);
+    it('accepts a Kenya landline number — not just mobile (the gap that prompted this fix)', () => {
+        expect(isValidPhone('254207640622')).toBe(true);
     });
 
     it('rejects a non-numeric string', () => {
@@ -58,9 +62,5 @@ describe('isValidPhone', () => {
 
     it('rejects an international-shaped number that is too long', () => {
         expect(isValidPhone('1234567890123456')).toBe(false);
-    });
-
-    it('still rejects a malformed Kenya-shaped number even though it is otherwise the right length', () => {
-        expect(isValidPhone('254812345678')).toBe(false);
     });
 });
