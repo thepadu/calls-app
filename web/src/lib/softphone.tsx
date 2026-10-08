@@ -371,10 +371,19 @@ function watchCallQuality(
     });
 }
 
-function watchIceConnection(session: Session, onRestartFailed: () => void) {
+// Returns the restart trigger itself so a *different* detector — the
+// one-way-audio heuristic in sampleCallQuality, which watches RTP-level
+// stats rather than ICE connection state — can reuse the exact same
+// recovery path. Found during the 2026-10-08 one-way-audio investigation:
+// WebRTC's iceConnectionState is a path-level signal (do connectivity
+// checks still succeed at all), not a per-direction one, so a silently
+// broken send path can leave the far end unable to hear the agent while
+// iceConnectionState never leaves 'connected' — the restart logic below
+// never fires on its own for exactly the case it would help most.
+function watchIceConnection(session: Session, onRestartFailed: () => void): (reason: string) => void {
     const pc = (session.sessionDescriptionHandler as unknown as { peerConnection: RTCPeerConnection })
         ?.peerConnection;
-    if (!pc) return;
+    if (!pc) return () => {};
     const startedAt = Date.now();
     let restarting = false;
     let disconnectedTimer: ReturnType<typeof setTimeout> | undefined;
@@ -439,6 +448,8 @@ function watchIceConnection(session: Session, onRestartFailed: () => void) {
             }, ICE_DISCONNECTED_DEBOUNCE_MS);
         }
     });
+
+    return attemptRestart;
 }
 
 export function SoftphoneProvider({ children }: { children: ReactNode }) {
@@ -506,13 +517,21 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
     const handleSessionEstablished = useCallback(
         (session: Session, remoteNumber: string) => {
             if (remoteAudioRef.current) attachRemoteAudio(session, remoteAudioRef.current);
-            watchIceConnection(session, () =>
+            const triggerIceRestart = watchIceConnection(session, () =>
                 showToast('Call audio may have been lost — confirm with the customer or end and redial', 'error')
             );
             watchLocalTrackHealth(session);
-            watchCallQuality(session, setConnectionQuality, () =>
-                showToast("Possible one-way audio — ask \"can you hear me?\" to confirm", 'error')
-            );
+            watchCallQuality(session, setConnectionQuality, () => {
+                // Attempt the same self-heal ICE restart already used for a
+                // detected ICE failure — renegotiates a fresh candidate pair
+                // on the existing call rather than just alerting and hoping
+                // the agent redials. Not guaranteed to fix a send path broken
+                // somewhere outside the browser's own control (e.g. upstream
+                // NAT/firewall), which is why the toast still tells the agent
+                // to actively confirm rather than trusting the restart alone.
+                triggerIceRestart('one-way audio suspected');
+                showToast("Possible one-way audio — reconnecting, and ask \"can you hear me?\" to confirm", 'error');
+            });
             setActiveCall({ session, remoteNumber, muted: false, held: false, startedAt: Date.now() });
         },
         [showToast]
