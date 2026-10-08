@@ -203,6 +203,15 @@ function reportClientDiagnostic(eventType: string, callDurationSeconds?: number,
 // (TURN) path is more exposed to added latency/jitter than a direct one.
 const CALL_QUALITY_SAMPLE_INTERVAL_MS = 20000;
 
+// 2026-10-08 "dropped calls" investigation (see DECISIONS.md): two real
+// calls ended at ~12s, before the first regular sample (fired at the
+// CALL_QUALITY_SAMPLE_INTERVAL_MS mark) ever ran — leaving zero quality
+// telemetry for either one. This extra early sample exists purely to catch
+// a short call that ends before the first regular tick; it's dropped from
+// the delta/alerting logic the same as the real first sample always was
+// (nothing to diff against yet), it just runs sooner.
+const CALL_QUALITY_EARLY_SAMPLE_DELAY_MS = 8000;
+
 // Phase 2 (same investigation): a loss-rate computed from one cumulative
 // snapshot is meaningless (packetsLost only ever goes up) — these two
 // thresholds apply to the *delta* between consecutive samples instead, see
@@ -217,13 +226,34 @@ const CALL_QUALITY_LOSS_RATE_THRESHOLD = 3;
 const CALL_QUALITY_JITTER_MS_THRESHOLD = 30;
 const CALL_QUALITY_BAD_SAMPLES_BEFORE_WEAK = 2;
 
-type CallQualityTrackerState = { prevPacketsLost: number | null; prevPacketsSent: number | null; consecutiveBadSamples: number };
+// 2026-10-08 one-way-audio investigation (see DECISIONS.md): a caller
+// reported hearing the agent fine while the agent couldn't be heard at all.
+// Two real calls that session showed the same telemetry shape — a burst of
+// loss on remote-inbound-rtp (the far end reporting what it received of the
+// agent's own outbound audio) crossing the existing "bad sample" threshold,
+// immediately followed by that same counter going completely flat (zero
+// *new* loss reported at all) for the rest of the call. A flat loss-rate
+// delta alone is the normal, good case (confirmed against every other call
+// that session) — it only means something once it follows a real spike,
+// which is why this requires both: at least one bad sample this call, then
+// this many dead-flat samples right after it.
+const ONE_WAY_AUDIO_FLAT_SAMPLES_AFTER_SPIKE = 2;
+
+type CallQualityTrackerState = {
+    prevPacketsLost: number | null;
+    prevPacketsSent: number | null;
+    consecutiveBadSamples: number;
+    hadBadSample: boolean;
+    flatSamplesSinceBad: number;
+    oneWayAudioReported: boolean;
+};
 
 async function sampleCallQuality(
     session: Session,
     startedAt: number,
     tracker: CallQualityTrackerState,
-    onQualityChange: (quality: ConnectionQuality) => void
+    onQualityChange: (quality: ConnectionQuality) => void,
+    onOneWayAudioSuspected: () => void
 ) {
     const pc = (session.sessionDescriptionHandler as unknown as { peerConnection: RTCPeerConnection })
         ?.peerConnection;
@@ -283,6 +313,22 @@ async function sampleCallQuality(
             tracker.consecutiveBadSamples = isBadSample ? tracker.consecutiveBadSamples + 1 : 0;
             onQualityChange(tracker.consecutiveBadSamples >= CALL_QUALITY_BAD_SAMPLES_BEFORE_WEAK ? 'weak' : 'good');
             parts.push(`lossRatePercent=${lossRatePercent.toFixed(1)}`);
+
+            if (isBadSample) {
+                tracker.hadBadSample = true;
+                tracker.flatSamplesSinceBad = 0;
+            } else if (tracker.hadBadSample && deltaLost === 0) {
+                tracker.flatSamplesSinceBad += 1;
+            } else {
+                tracker.flatSamplesSinceBad = 0;
+            }
+            if (
+                !tracker.oneWayAudioReported &&
+                tracker.flatSamplesSinceBad >= ONE_WAY_AUDIO_FLAT_SAMPLES_AFTER_SPIKE
+            ) {
+                tracker.oneWayAudioReported = true;
+                onOneWayAudioSuspected();
+            }
         }
     }
     if (packetsLost !== null) tracker.prevPacketsLost = packetsLost;
@@ -294,14 +340,34 @@ async function sampleCallQuality(
     reportClientDiagnostic('call_quality_sample', callDurationSeconds, parts.join(' '));
 }
 
-function watchCallQuality(session: Session, onQualityChange: (quality: ConnectionQuality) => void) {
+function watchCallQuality(
+    session: Session,
+    onQualityChange: (quality: ConnectionQuality) => void,
+    onOneWayAudioSuspected: () => void
+) {
     const startedAt = Date.now();
-    const tracker: CallQualityTrackerState = { prevPacketsLost: null, prevPacketsSent: null, consecutiveBadSamples: 0 };
-    const interval = setInterval(() => {
-        sampleCallQuality(session, startedAt, tracker, onQualityChange).catch(() => {});
-    }, CALL_QUALITY_SAMPLE_INTERVAL_MS);
+    const tracker: CallQualityTrackerState = {
+        prevPacketsLost: null,
+        prevPacketsSent: null,
+        consecutiveBadSamples: 0,
+        hadBadSample: false,
+        flatSamplesSinceBad: 0,
+        oneWayAudioReported: false
+    };
+    const runSample = () => {
+        sampleCallQuality(session, startedAt, tracker, onQualityChange, () => {
+            const callDurationSeconds = Math.round((Date.now() - startedAt) / 1000);
+            reportClientDiagnostic('one_way_audio_suspected', callDurationSeconds, 'loss spike then stale remote-inbound-rtp');
+            onOneWayAudioSuspected();
+        }).catch(() => {});
+    };
+    const earlyTimer = setTimeout(runSample, CALL_QUALITY_EARLY_SAMPLE_DELAY_MS);
+    const interval = setInterval(runSample, CALL_QUALITY_SAMPLE_INTERVAL_MS);
     session.stateChange.addListener(state => {
-        if (state === SessionState.Terminated) clearInterval(interval);
+        if (state === SessionState.Terminated) {
+            clearTimeout(earlyTimer);
+            clearInterval(interval);
+        }
     });
 }
 
@@ -444,7 +510,9 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
                 showToast('Call audio may have been lost — confirm with the customer or end and redial', 'error')
             );
             watchLocalTrackHealth(session);
-            watchCallQuality(session, setConnectionQuality);
+            watchCallQuality(session, setConnectionQuality, () =>
+                showToast("Possible one-way audio — ask \"can you hear me?\" to confirm", 'error')
+            );
             setActiveCall({ session, remoteNumber, muted: false, held: false, startedAt: Date.now() });
         },
         [showToast]

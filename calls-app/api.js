@@ -2498,7 +2498,8 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
         'ice_restart_failed',
         'ws_disconnect',
         'ws_reconnect',
-        'call_quality_sample'
+        'call_quality_sample',
+        'one_way_audio_suspected'
     ];
     // Only the failure-shaped events are worth an alert — 'attempt'/
     // 'recovered'/'ws_reconnect' just mean the existing recovery logic did
@@ -2516,6 +2517,12 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
     const CONCERNING_EVENT_TYPES = ['ice_restart_failed', 'ws_disconnect'];
     const DIAGNOSTIC_FLAP_WINDOW_MS = 60 * 60 * 1000;
     const DIAGNOSTIC_FLAP_THRESHOLD = 3;
+    // Unlike the flap-count events above, one suspected one-way-audio call is
+    // already a live customer-facing problem on its own (found via the
+    // 2026-10-08 investigation: the far end reporting they couldn't hear the
+    // agent while the agent could still hear them) — worth an immediate
+    // alert, not waiting for a 3-in-an-hour pattern.
+    const IMMEDIATE_ALERT_EVENT_TYPES = ['one_way_audio_suspected'];
 
     app.post('/api/client-diagnostics', requireAuth, async (req, res) => {
         const { event_type, call_duration_seconds, detail } = req.body;
@@ -2557,6 +2564,12 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
                     `⚠️ Agent ${req.user.agentId}'s softphone has reported ${count} connection problem(s) in the last hour — likely an unstable connection.`
                 );
             }
+        }
+
+        if (req.user.agentId && IMMEDIATE_ALERT_EVENT_TYPES.includes(event_type)) {
+            alertGChat(
+                `🔇 Agent ${req.user.agentId}'s softphone suspects one-way audio on an active call (${callDurationSeconds ?? '?'}s in) — the far end may not be able to hear them.`
+            );
         }
 
         res.status(204).end();
