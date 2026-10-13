@@ -893,6 +893,23 @@ async function enterQueue(channel, sessionId) {
     waitingQueue.push({ channel, sessionId, joinedAt: Date.now(), bridge });
     await upsertCallLog({ session_id: sessionId, status: 'queued' });
     console.log(`⏳ ${sessionId} entered the hold queue (${waitingQueue.length} waiting)`);
+
+    // Immediate, per-caller signal — distinct from giveUpOnQueuedCustomer's
+    // own alert below, which only fires once a caller has already waited out
+    // the full MAX_QUEUE_WAIT_MS and given up. That one is too late to do
+    // anything about; this one fires the moment the call arrives, while an
+    // agent on break still has time to log back in before the caller gives
+    // up. The single shared entry point for every path into the queue (the
+    // menu-disabled shortcut above and transfer_agent's own fallthrough both
+    // call this), so this check covers both instead of needing its own copy
+    // in each. Re-checks fresh rather than reusing transfer_agent's own
+    // earlier read — agent availability can change in the seconds since,
+    // e.g. while a response_message was still playing.
+    const availableAgents = await getAvailableAgentsWithSip();
+    if (availableAgents.length === 0) {
+        const callerNumber = normalizePhone(channel.caller.number) || 'Unknown-Caller';
+        alertGChat(`📞 Caller ${callerNumber} is in the queue right now with no agent available to answer.`);
+    }
 }
 
 // Guards against overlapping runs — setInterval fires every QUEUE_POLL_MS
