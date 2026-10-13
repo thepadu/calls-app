@@ -114,6 +114,53 @@ function sendDtmfTone(session: Session, tone: string): boolean {
     return sdh?.sendDtmf?.(tone) ?? false;
 }
 
+// PushManager.subscribe()'s applicationServerKey wants a raw Uint8Array, not
+// the base64url string the VAPID public key actually is everywhere else
+// (env vars, the API response) — this is the standard conversion every
+// Web Push guide has you write by hand, since the platform itself doesn't
+// expose one.
+function base64UrlToUint8Array(base64Url: string): Uint8Array<ArrayBuffer> {
+    const padding = '='.repeat((4 - (base64Url.length % 4)) % 4);
+    const base64 = (base64Url + padding).replace(/-/g, '+').replace(/_/g, '/');
+    const raw = window.atob(base64);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    return bytes;
+}
+
+// Phase 1 of the 2026-10-13 "keep calls ringing in the background" work (see
+// DECISIONS.md). Unlike useCallNotification's deliberately lazy "ask at the
+// first real ring" permission request, this has to run proactively once
+// registered — push exists specifically for when the tab/app is NOT open to
+// ask lazily from, so there's no later moment to defer to. subscribe() is
+// idempotent (returns the existing subscription if one's already active), so
+// calling this more than once is harmless, but it's still only invoked once
+// per registration (see hasSubscribedPushRef) to avoid a redundant POST on
+// every reconnect.
+async function subscribeToIncomingCallPush(vapidPublicKey: string) {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
+    if (Notification.permission === 'denied') return;
+    if (Notification.permission === 'default') {
+        const permission = await Notification.requestPermission();
+        if (permission !== 'granted') return;
+    }
+
+    const registration = await navigator.serviceWorker.ready;
+    const subscription =
+        (await registration.pushManager.getSubscription()) ??
+        (await registration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: base64UrlToUint8Array(vapidPublicKey)
+        }));
+
+    const json = subscription.toJSON();
+    if (!json.endpoint || !json.keys) return;
+    await apiFetch('/api/agents/me/push-subscription', {
+        method: 'POST',
+        body: JSON.stringify({ endpoint: json.endpoint, keys: json.keys })
+    }).catch(() => {});
+}
+
 // Backgrounding the tab/PWA (switching apps mid-call on mobile) commonly
 // suspends getUserMedia capture at the OS/browser level while leaving the
 // RTCPeerConnection itself connected — the call stays "connected" but the
@@ -458,6 +505,7 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
     const userAgentRef = useRef<UserAgent | null>(null);
     const registererRef = useRef<Registerer | null>(null);
     const domainRef = useRef<string>('sip.chumz.online');
+    const vapidPublicKeyRef = useRef<string | null>(null);
     const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
 
     const [registrationState, setRegistrationState] = useState<RegistrationState>('unregistered');
@@ -498,6 +546,7 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
     const [micPermissionDenied, setMicPermissionDenied] = useState(false);
     const hasSetAvailableRef = useRef(false);
     const hasRequestedMicRef = useRef(false);
+    const hasSubscribedPushRef = useRef(false);
 
     const audioOutputSupported = typeof (window.HTMLMediaElement?.prototype as SinkableAudioElement)?.setSinkId === 'function';
 
@@ -623,6 +672,7 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
             console.log(`[softphone] got credentials for ${creds.username}@${creds.domain}, connecting to ${creds.wssUrl}`);
 
             domainRef.current = creds.domain;
+            vapidPublicKeyRef.current = creds.vapidPublicKey ?? null;
             const uri = UserAgent.makeURI(`sip:${creds.username}@${creds.domain}`);
             if (!uri) {
                 console.error('[softphone] UserAgent.makeURI returned null for', creds.username, creds.domain);
@@ -884,6 +934,18 @@ export function SoftphoneProvider({ children }: { children: ReactNode }) {
         if (registrationState !== 'registered' || hasSetAvailableRef.current) return;
         hasSetAvailableRef.current = true;
         apiFetch('/api/agents/me/status', { method: 'PATCH', body: JSON.stringify({ status: 'available' }) }).catch(() => {});
+    }, [registrationState]);
+
+    // See subscribeToIncomingCallPush for why this can't wait for the first
+    // real ring the way useCallNotification's own permission request does.
+    useEffect(() => {
+        if (registrationState !== 'registered' || hasSubscribedPushRef.current) return;
+        const vapidPublicKey = vapidPublicKeyRef.current;
+        if (!vapidPublicKey) return; // VAPID_PUBLIC_KEY not configured server-side — feature not live yet
+        hasSubscribedPushRef.current = true;
+        subscribeToIncomingCallPush(vapidPublicKey).catch(err =>
+            console.error('[softphone] failed to subscribe to incoming-call push:', err)
+        );
     }, [registrationState]);
 
     // Microphone permission was previously only ever requested at the exact

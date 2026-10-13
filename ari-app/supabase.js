@@ -250,6 +250,27 @@ async function getAgentSipCredentials(agentId) {
     return { sipUsername: data.sip_username, status: data.agents?.status ?? null, name: data.agents?.name ?? null };
 }
 
+// Phase 1 of the 2026-10-13 "keep calls ringing in the background" work
+// (see DECISIONS.md) — one agent can have several (desktop + phone, two
+// browsers), all of them get pushed, same "ring every registered endpoint"
+// spirit as ring_all.
+async function getAgentPushSubscriptions(agentId) {
+    const { data, error } = await supabase
+        .from('agent_push_subscriptions')
+        .select('endpoint, p256dh, auth')
+        .eq('agent_id', agentId);
+    if (error) {
+        console.error('❌ Failed to load push subscriptions for agent:', error.message);
+        return [];
+    }
+    return data ?? [];
+}
+
+async function deletePushSubscription(endpoint) {
+    const { error } = await supabase.from('agent_push_subscriptions').delete().eq('endpoint', endpoint);
+    if (error) console.error('❌ Failed to remove stale push subscription:', error.message);
+}
+
 // "No agents online" forwarding — reuses the existing 'no_answer' condition
 // (the closest semantic fit of the four already in the schema; there's no
 // dedicated "nobody logged in" condition) rather than adding a new one.
@@ -637,6 +658,8 @@ module.exports = {
     getAgentPhone,
     getAgentBySipUsername,
     getAgentSipCredentials,
+    getAgentPushSubscriptions,
+    deletePushSubscription,
     getNoAgentsForwardingDestination,
     getBusinessHours,
     getLoggedInAgentCount,

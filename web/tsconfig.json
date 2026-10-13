@@ -17,5 +17,12 @@
     "noFallthroughCasesInSwitch": true
   },
   "include": ["src"],
-  "references": [{ "path": "./tsconfig.node.json" }]
+  // sw.ts runs in a ServiceWorkerGlobalScope, not a Window — its `self` is
+  // not the DOM `self` this program's own lib config assumes, so it's
+  // excluded from this program and type-checked separately via
+  // tsconfig.worker.json instead (same split vite.config.ts already gets
+  // via tsconfig.node.json, for the same kind of reason: a different global
+  // environment than the rest of src).
+  "exclude": ["src/sw.ts"],
+  "references": [{ "path": "./tsconfig.node.json" }, { "path": "./tsconfig.worker.json" }]
 }

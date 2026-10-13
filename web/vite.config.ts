@@ -10,6 +10,17 @@ export default defineConfig({
     plugins: [
         react(),
         VitePWA({
+            // 2026-10-13 "keep calls ringing in the background" work (see
+            // DECISIONS.md): switched from the default `generateSW` (a fully
+            // auto-generated Service Worker with no custom code) to
+            // `injectManifest`, which still auto-generates the precache
+            // manifest but lets src/sw.ts add a real `push` handler —
+            // needed to show a system notification when a call rings while
+            // the app is fully closed. Nothing about the existing
+            // install/update/caching behavior changes.
+            strategies: 'injectManifest',
+            srcDir: 'src',
+            filename: 'sw.ts',
             registerType: 'autoUpdate',
             includeAssets: ['favicon.ico', 'apple-touch-icon-180x180.png', 'logo.svg', 'splash-*.png'],
             manifest: {
@@ -25,21 +36,6 @@ export default defineConfig({
                     { src: 'pwa-192x192.png', sizes: '192x192', type: 'image/png' },
                     { src: 'pwa-512x512.png', sizes: '512x512', type: 'image/png' },
                     { src: 'maskable-icon-512x512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
-                ]
-            },
-            workbox: {
-                // Only the SPA's own built assets (under /app/) get any
-                // caching benefit, for fast reloads and installability.
-                // Everything else — the JSON API, auth redirects, the
-                // server-rendered /login page — must always hit the network
-                // fresh. This is a real-time call center tool; a cached
-                // stale API response (an agent's own status, a live queue
-                // count) would be actively wrong, not just outdated.
-                runtimeCaching: [
-                    {
-                        urlPattern: ({ url }) => !url.pathname.startsWith('/app/'),
-                        handler: 'NetworkOnly'
-                    }
                 ]
             }
         })

@@ -1292,8 +1292,63 @@ module.exports = function (app, supabase, requireAuth, requireSupervisor) {
             // credential should be rotated on the TURN server itself.
             turnUrl: process.env.SOFTPHONE_TURN_URL || 'turn:64.227.160.38:3478',
             turnUsername: process.env.SOFTPHONE_TURN_USERNAME || 'chumzagent',
-            turnPassword: process.env.SOFTPHONE_TURN_PASSWORD
+            turnPassword: process.env.SOFTPHONE_TURN_PASSWORD,
+            // Public by design (it's an "applicationServerKey" the browser
+            // hands back to the push service, not a credential) — bundled
+            // into this same response rather than a separate endpoint since
+            // the frontend already fetches this right when it's about to
+            // register, exactly when it also needs to set up its push
+            // subscription. null (not a hardcoded fallback) when unset, so a
+            // missing VAPID_PUBLIC_KEY fails the subscribe attempt loudly
+            // instead of silently running with a key nothing server-side can
+            // actually decrypt pushes for.
+            vapidPublicKey: process.env.VAPID_PUBLIC_KEY || null
         });
+    });
+
+    // Phase 1 of the 2026-10-13 "keep calls ringing in the background" work
+    // (see DECISIONS.md) — stores the browser's PushSubscription so ari-app
+    // can push a system notification the moment it starts ringing this
+    // agent, even if their tab/PWA is fully closed. One endpoint can only
+    // ever belong to whichever agent most recently subscribed from that
+    // browser (onConflict: 'endpoint'), matching how a shared/kiosk device
+    // re-subscribing under a different logged-in agent should behave.
+    app.post('/api/agents/me/push-subscription', requireAuth, async (req, res) => {
+        const { endpoint, keys } = req.body;
+        if (typeof endpoint !== 'string' || !endpoint || typeof keys?.p256dh !== 'string' || typeof keys?.auth !== 'string') {
+            return res.status(400).json({ error: 'Invalid push subscription' });
+        }
+
+        const agentQuery = req.user.agentId
+            ? supabase.from('agents').select('id').eq('id', req.user.agentId)
+            : supabase.from('agents').select('id').ilike('email', escapeLikePattern(req.user.email));
+        const { data: agent } = await agentQuery.maybeSingle();
+        if (!agent) {
+            return res.status(404).json({ error: 'No agent record linked to your account yet' });
+        }
+
+        const { error } = await supabase
+            .from('agent_push_subscriptions')
+            .upsert({ agent_id: agent.id, endpoint, p256dh: keys.p256dh, auth: keys.auth }, { onConflict: 'endpoint' });
+        if (error) {
+            console.error('❌ Failed to save push subscription:', error.message);
+            return res.status(500).json({ error: 'Failed to save push subscription' });
+        }
+        res.status(204).end();
+    });
+
+    // Called on logout/unsubscribe — best-effort: a push subscription
+    // that's never explicitly removed just goes stale (the push service
+    // itself eventually reports it as gone, see ari-app's send path) rather
+    // than causing any harm, so this never needs to be more than best-effort.
+    app.delete('/api/agents/me/push-subscription', requireAuth, async (req, res) => {
+        const { endpoint } = req.body;
+        if (typeof endpoint !== 'string' || !endpoint) {
+            return res.status(400).json({ error: 'Invalid endpoint' });
+        }
+        const { error } = await supabase.from('agent_push_subscriptions').delete().eq('endpoint', endpoint);
+        if (error) console.error('❌ Failed to remove push subscription:', error.message);
+        res.status(204).end();
     });
 
     // ── Agent roster management (supervisors only) ─────────────────────

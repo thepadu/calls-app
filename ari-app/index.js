@@ -34,6 +34,7 @@ process.on('uncaughtException', err => {
 const crypto = require('crypto');
 const http = require('http');
 const ari = require('ari-client');
+const webpush = require('web-push');
 const { normalizePhone } = require('./lib/phone');
 const { errText, safeEqual, isWithinBusinessHours, parseSipUsername } = require('./lib/helpers');
 const { synthesize, invalidate } = require('./tts');
@@ -48,6 +49,8 @@ const {
     getAgentPhone,
     getAgentBySipUsername,
     getAgentSipCredentials,
+    getAgentPushSubscriptions,
+    deletePushSubscription,
     getNoAgentsForwardingDestination,
     getBusinessHours,
     getLoggedInAgentCount,
@@ -87,6 +90,25 @@ const ARI_URL = process.env.ARI_URL || 'http://127.0.0.1:8088';
 const ARI_USERNAME = process.env.ARI_USERNAME;
 const ARI_PASSWORD = process.env.ARI_PASSWORD;
 const APP_NAME = process.env.ARI_APP_NAME || 'chumz-ivr';
+// Phase 1 of the 2026-10-13 "keep calls ringing in the background" work
+// (see DECISIONS.md). Fails open, same as getNoAgentsForwardingDestination's
+// own "feature not configured" posture — an unset key just means
+// sendIncomingCallPush silently no-ops rather than this process refusing to
+// start, since push is a best-effort noticeability layer, not something any
+// real call-handling path depends on.
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || null;
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || null;
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:sam.njoki@chumz.io';
+const PUSH_CONFIGURED = Boolean(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY);
+if (PUSH_CONFIGURED) webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+// A cold-start tap-to-reopen (notice push → unlock phone → tap → app
+// reopens → SIP re-registers) realistically needs more than the normal 25s
+// ring window — confirmed against Asterisk's own channels.originate timeout
+// below. Only applied for an agent who actually has a push subscription to
+// receive, so an agent without this set up doesn't make customers wait any
+// longer than before for no benefit.
+const RING_TIMEOUT_SEC = 25;
+const RING_TIMEOUT_PUSH_ELIGIBLE_SEC = 45;
 const MENU_TIMEOUT_MS = 15000;
 const RATING_TIMEOUT_MS = 8000;
 const QUEUE_POLL_MS = 3000;
@@ -929,6 +951,34 @@ async function tryDequeueNext() {
     }
 }
 
+// Phase 1 of the 2026-10-13 "keep calls ringing in the background" work (see
+// DECISIONS.md). Takes an already-fetched subscriptions list (not an
+// agentId) so the caller can decide the ring timeout off the same read
+// instead of this doing a second one — and so the actual sends can be fired
+// without awaiting them, in parallel with the real SIP origination, never
+// ahead of or blocking it. Each subscription is pushed independently so one
+// stale endpoint can't stop another (desktop + phone) from getting it.
+function sendIncomingCallPush(subscriptions) {
+    const payload = JSON.stringify({ title: 'Incoming call', body: 'Open Chumz to answer' });
+    for (const sub of subscriptions) {
+        webpush
+            .sendNotification({ endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } }, payload)
+            .catch(err => {
+                // 404/410 means the push service itself says this
+                // subscription is gone for good (browser data cleared,
+                // uninstalled, expired) — anything else (a transient 5xx, a
+                // network blip) is left alone to retry on the next real call
+                // rather than deleting a still-good subscription over one
+                // bad send.
+                if (err?.statusCode === 404 || err?.statusCode === 410) {
+                    deletePushSubscription(sub.endpoint);
+                } else {
+                    console.error('⚠️ Failed to send incoming-call push:', err.message);
+                }
+            });
+    }
+}
+
 // Originates one ring leg to one agent for one waiting customer, pushing the
 // resulting channel into the shared ringGroup on success. Shared by
 // dequeueNext (called once per currently-available agent, fanning a single
@@ -974,6 +1024,14 @@ async function ringOneAgent(agent, waiting, ringGroup, customerNumber) {
         bridge: waiting.bridge,
         joinedAt: waiting.joinedAt
     });
+    // Checked before originating (not fired after) so the longer timeout
+    // below can be decided off the same read — the actual push sends
+    // themselves are still fired without awaiting them, so this adds at
+    // most one fast Supabase query to the critical path, not a round trip
+    // to the push service itself.
+    const pushSubscriptions = PUSH_CONFIGURED ? await getAgentPushSubscriptions(agent.id) : [];
+    if (pushSubscriptions.length > 0) sendIncomingCallPush(pushSubscriptions);
+
     try {
         const agentChannel = await client.channels.originate({
             channelId,
@@ -985,7 +1043,7 @@ async function ringOneAgent(agent, waiting, ringGroup, customerNumber) {
             // malformed request ("Allocation failed") rather than an
             // encoding error.
             callerId: customerNumber,
-            timeout: 25
+            timeout: pushSubscriptions.length > 0 ? RING_TIMEOUT_PUSH_ELIGIBLE_SEC : RING_TIMEOUT_SEC
         });
         ringGroup.push({ channel: agentChannel, agentId: agent.id });
         ringFailureCounts.delete(agent.id);
