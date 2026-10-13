@@ -97,9 +97,22 @@ function useCallNotification(incomingCall: { callerNumber: string } | null) {
         if (shownFor.current === incomingCall.callerNumber) return;
         shownFor.current = incomingCall.callerNumber;
 
-        if (!('Notification' in window)) return;
+        if (!('Notification' in window) || !('serviceWorker' in navigator)) return;
 
-        const show = () => new Notification('Incoming call', { body: incomingCall.callerNumber, tag: 'incoming-call' });
+        // Shown via the Service Worker registration, not the bare
+        // `new Notification(...)` constructor — confirmed via MDN/Chromium's
+        // own docs that the constructor throws a TypeError on nearly all
+        // mobile browsers (Android Chrome included), since a page-context
+        // notification can't be shown reliably once a mobile tab is
+        // backgrounded. That silently broke this exact feature on Android —
+        // the platform where noticing a backgrounded call matters most.
+        // `vite-plugin-pwa`'s existing `generateSW` setup already registers
+        // a working Service Worker, so `navigator.serviceWorker.ready`
+        // resolves without any SW code of our own.
+        const show = () =>
+            navigator.serviceWorker.ready.then(registration =>
+                registration.showNotification('Incoming call', { body: incomingCall.callerNumber, tag: 'incoming-call' })
+            );
 
         if (Notification.permission === 'granted') {
             show();
