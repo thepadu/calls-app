@@ -142,6 +142,16 @@ const NO_AGENTS_ALERT_THRESHOLD_MS = 10 * 60 * 1000;
 const NO_AGENTS_POLL_MS = 60 * 1000;
 let noAgentsSince = null;
 let noAgentsAlerted = false;
+// 2026-10-13 real-incident finding: this whole check is gated behind
+// business_hours.enabled, which defaults to (and currently is) false — a
+// config nobody had ever turned on. That meant a literal total outage (every
+// single agent auto-flipped offline after a ring failure, nobody left to
+// answer anyone) produced zero alert, because "business hours disabled" was
+// read as "don't alert" rather than "no configured concept of hours, so
+// never treat zero agents as expected." Separate state so this can't
+// interfere with the hours-aware check's own edge-triggering above.
+let noAgentsAnytimeSince = null;
+let noAgentsAnytimeAlerted = false;
 // A ring failure ("Allocation failed" from PJSIP — no active registration to
 // route to) most often means this agent's SIP session has already died even
 // though their heartbeat/DB status hasn't caught up yet (reconcileGhostAgents
@@ -149,10 +159,36 @@ let noAgentsAlerted = false;
 // getting re-matched to the same dead agent on every 3s poll tick, over and
 // over, because the original catch here unconditionally reset them back to
 // 'available' after every failure. Two consecutive failures for the same
-// agent now flips them offline immediately instead of retrying them forever
-// — their own softphone reconnecting brings them back the normal way.
+// agent now flips them offline immediately instead of retrying them forever.
+// (This comment previously claimed their own softphone reconnecting brings
+// them back the normal way — confirmed false by a real 2026-10-13 incident:
+// the web client only ever sets 'available' once per page load, so an
+// already-open tab's registration recovering does NOT undo this on its own.
+// reconcileAutoOfflineAgents below is what actually closes that gap now.)
 const RING_FAILURE_THRESHOLD = 2;
-const ringFailureCounts = new Map(); // agentId -> consecutive origination-failure count
+// 2026-10-13 real-incident finding: a confirmed root cause for a ring
+// failure is the agent's own browser-to-Asterisk WebSocket having just
+// flapped — the SIP registration it's rebuilding can genuinely still be
+// mid-flight a few seconds later. The previous two-strikes-back-to-back
+// (~3s apart, QUEUE_POLL_MS) gave that registration no real chance to land
+// before punishing the agent for it, and auto-flipping offline in a
+// near-single-agent setup meant a real caller got "failed" three times in a
+// row with nobody left to answer. Requiring this much elapsed time since
+// the *first* failure before the threshold can trip buys real reconnect
+// time without weakening the threshold itself — an agent who's still
+// failing after it still gets flipped offline, just not one mid-reconnect.
+const RING_FAILURE_GRACE_MS = 15000;
+const ringFailureCounts = new Map(); // agentId -> { count, firstFailureAt }
+// Tracks agents auto-flipped offline by the ring-failure path above (not
+// anyone who went offline deliberately) so reconcileAutoOfflineAgents can
+// bring them back without any human having to notice and manually flip them
+// — confirmed live that nothing else does this: the web client only ever
+// sets 'available' once per page load (see hasSetAvailableRef in
+// softphone.tsx), so an already-open tab whose registration later recovers
+// does NOT re-send it, and the agent is stuck offline until a reload or a
+// manual toggle. See reconcileAutoOfflineAgents's own comment for how
+// "recovered" is actually checked.
+const autoOfflineAgentIds = new Map(); // agentId -> sipUsername
 const HOLDING_BRIDGE_NAME = 'support-queue';
 // AT's trunk rules explicitly prohibit masking outbound caller ID — every
 // agent-placed call must present the same assigned Voice number, regardless
@@ -561,7 +597,23 @@ http.createServer(async (req, res) => {
 // the first, actually-useful alert in repeats.
 async function checkNoAgentsDuringBusinessHours() {
     const hours = await getBusinessHours();
-    if (!hours.enabled || !isWithinBusinessHours(hours)) {
+
+    // Hours aren't configured at all — there's no "expected to be closed"
+    // window to defer to, so a total outage would otherwise go completely
+    // unalerted (see the real incident this closes, in the comment above
+    // noAgentsAnytimeSince). Runs instead of the hours-aware check below,
+    // not alongside it, so an operator who later enables real hours doesn't
+    // get double-alerted for the same outage.
+    if (!hours.enabled) {
+        noAgentsSince = null;
+        noAgentsAlerted = false;
+        await checkNoAgentsAnytime();
+        return;
+    }
+    noAgentsAnytimeSince = null;
+    noAgentsAnytimeAlerted = false;
+
+    if (!isWithinBusinessHours(hours)) {
         noAgentsSince = null;
         noAgentsAlerted = false;
         return;
@@ -582,6 +634,25 @@ async function checkNoAgentsDuringBusinessHours() {
         if (noAgentsAlerted) alertGChat('✅ At least one agent is logged in again.');
         noAgentsSince = null;
         noAgentsAlerted = false;
+    }
+}
+
+async function checkNoAgentsAnytime() {
+    const count = await getLoggedInAgentCount();
+    if (count < 0) return; // query failed — getLoggedInAgentCount already logged why
+
+    if (count === 0) {
+        if (noAgentsAnytimeSince === null) noAgentsAnytimeSince = Date.now();
+        if (!noAgentsAnytimeAlerted && Date.now() - noAgentsAnytimeSince >= NO_AGENTS_ALERT_THRESHOLD_MS) {
+            noAgentsAnytimeAlerted = true;
+            alertGChat(
+                `🔴 No agents have been logged in for ${Math.round(NO_AGENTS_ALERT_THRESHOLD_MS / 60000)}+ minutes (business hours aren't configured, so this isn't expected downtime) — inbound callers have nobody to reach.`
+            );
+        }
+    } else {
+        if (noAgentsAnytimeAlerted) alertGChat('✅ At least one agent is logged in again.');
+        noAgentsAnytimeSince = null;
+        noAgentsAnytimeAlerted = false;
     }
 }
 
@@ -904,16 +975,20 @@ async function ringOneAgent(agent, waiting, ringGroup, customerNumber) {
     } catch (err) {
         agentLegBySessionId.delete(channelId);
         console.error(`❌ Failed to ring ${agentLabel}:`, errText(err));
-        const failures = (ringFailureCounts.get(agent.id) || 0) + 1;
-        if (failures >= RING_FAILURE_THRESHOLD) {
+        const existing = ringFailureCounts.get(agent.id);
+        const firstFailureAt = existing?.firstFailureAt ?? Date.now();
+        const failures = (existing?.count ?? 0) + 1;
+        const graceElapsed = Date.now() - firstFailureAt >= RING_FAILURE_GRACE_MS;
+        if (failures >= RING_FAILURE_THRESHOLD && graceElapsed) {
             console.warn(
                 `⚠️ ${agentLabel} failed to ring ${failures} times in a row — flipping offline instead of retrying again next tick`
             );
             alertGChat(`⚠️ ${agentLabel} failed to ring ${failures} times in a row for a real waiting caller — flipped offline.`);
             ringFailureCounts.delete(agent.id);
+            autoOfflineAgentIds.set(agent.id, agent.sipUsername);
             await setAgentStatus(agent.id, 'offline', 'ringing');
         } else {
-            ringFailureCounts.set(agent.id, failures);
+            ringFailureCounts.set(agent.id, { count: failures, firstFailureAt });
             await setAgentStatus(agent.id, 'available', 'ringing');
         }
     }
@@ -1779,6 +1854,31 @@ async function reconcileGhostOnCallAgents() {
     return stuck;
 }
 
+// Closes the gap noted on autoOfflineAgentIds above: an agent auto-flipped
+// offline by a ring failure has no other path back without a human
+// noticing. Checks PJSIP's own registration state directly (ARI's
+// `endpoints` resource — 'online' means at least one active contact is
+// registered) rather than placing another real origination attempt, which
+// would actually ring the agent's phone just to test it. CAS'd against
+// 'offline' for the same reason as reconcileGhostOnCallAgents above: if a
+// human already manually brought this agent back (or set them to break)
+// since the auto-flip, this no-ops instead of overwriting a deliberate
+// status — either way the entry is removed, since there's nothing left for
+// this check to do for that agent.
+async function reconcileAutoOfflineAgents() {
+    if (autoOfflineAgentIds.size === 0) return [];
+    const recovered = [];
+    for (const [agentId, sipUsername] of autoOfflineAgentIds) {
+        const endpoint = await client.endpoints.get({ tech: 'PJSIP', resource: sipUsername }).catch(() => null);
+        if (!endpoint) continue; // transient ARI error — leave tracked, retry next tick
+        if (endpoint.state !== 'online') continue; // still not reachable — leave tracked
+        autoOfflineAgentIds.delete(agentId);
+        const flipped = await setAgentStatus(agentId, 'available', 'offline');
+        if (flipped) recovered.push(agentId);
+    }
+    return recovered;
+}
+
 // Blind-add-a-party MVP: calls-app has no direct line into a live call —
 // this process is the only thing that can touch a real bridge — so a
 // supervisor/agent request lands as two columns on the call's own
@@ -2222,6 +2322,20 @@ async function main() {
     setInterval(
         () => checkNoAgentsDuringBusinessHours().catch(err => console.error('❌ No-agents check error:', err.message)),
         NO_AGENTS_POLL_MS
+    );
+
+    // Same cadence as the other ghost-state reconciliation checks above —
+    // see reconcileAutoOfflineAgents for the gap this closes.
+    setInterval(
+        () =>
+            reconcileAutoOfflineAgents()
+                .then(recovered => {
+                    if (recovered.length === 0) return;
+                    console.log(`✅ ${recovered.length} auto-offline agent(s) reachable again — flipped back to available`);
+                    alertGChat(`✅ ${recovered.length} agent(s) previously auto-flipped offline after a ring failure are reachable again — flipped back to available.`);
+                })
+                .catch(err => console.error('❌ Auto-offline reconciliation poll error:', err.message)),
+        GHOST_AGENT_POLL_MS
     );
 
     console.log(`✅ ARI app "${APP_NAME}" connected to ${ARI_URL} and listening`);
